@@ -245,7 +245,12 @@ class OpenAIProvider:
             # fixable error instead of crashing the run.
             if not isinstance(args, dict):
                 args = {"_raw": tc.function.arguments}
-            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+            # Some OpenAI-compatible gateways omit the id. It is only used to
+            # pair the call with its tool_result, so any stable unique value
+            # works - and a missing one must not crash the run.
+            call_id = tc.id or f"call_{len(tool_calls)}"
+            tool_calls.append(ToolCall(id=call_id, name=tc.function.name,
+                                       arguments=args))
 
         usage = Usage(
             input_tokens=getattr(resp.usage, "prompt_tokens", 0),

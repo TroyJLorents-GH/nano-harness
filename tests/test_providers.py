@@ -367,10 +367,32 @@ class _OaiMsg:
 
 
 class _OaiTC:
-    def __init__(self, args):
-        self.id = "c1"
+    def __init__(self, args, id="c1"):
+        self.id = id
         self.type = "function"
         self.function = type("F", (), {"name": "bash", "arguments": args})()
+
+
+def test_openai_null_tool_call_id_does_not_crash(monkeypatch):
+    # Some OpenAI-compatible gateways omit the tool-call id. ToolCall.id is a
+    # required str, so Pydantic raised ValidationError, which the agent loop
+    # turned into stop_reason="error". Observed: db-wal-recovery died at
+    # iteration 13 of a real benchmark run. Synthesize an id instead.
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    fake_client = MagicMock()
+    resp = MagicMock()
+    resp.choices = [MagicMock(
+        message=_OaiMsg([_OaiTC('{"command": "ls"}', id=None)]),
+        finish_reason="tool_calls")]
+    resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+    fake_client.chat.completions.create.return_value = resp
+    p = OpenAIProvider(model="x", client=fake_client)
+    sr = p.step([{"role": "user", "content": "hi"}], [], "sys")
+
+    assert len(sr.tool_calls) == 1
+    assert sr.tool_calls[0].id, "a usable id must be synthesized"
+    assert sr.tool_calls[0].arguments == {"command": "ls"}
 
 
 def test_openai_wrong_type_tool_args_wrapped(monkeypatch):
