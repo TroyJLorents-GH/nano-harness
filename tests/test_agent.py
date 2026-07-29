@@ -281,6 +281,36 @@ def test_agent_unverified_when_no_evidence_and_no_pushback_room():
     assert result.iterations == 2
 
 
+def test_empty_model_turn_never_yields_an_empty_content_message():
+    # A step with no text and no tool calls used to serialize as
+    # {"role": "assistant", "content": []}. Anthropic rejects a non-final
+    # message with empty content (400, and 400 is not retryable), so on the
+    # Anthropic path that ends the run; on the OpenAI path it becomes
+    # content:null and the model tends to emit another empty turn, burning
+    # the verify budget. Observed on 5 trials, all scoring 0.
+    fp = FakeProvider([])
+    agent = Agent(provider=fp, system="sys")
+    msg = agent._assistant_message(
+        StepResult(text=None, tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 0)))
+
+    assert msg["content"], "assistant message must never have empty content"
+
+
+def test_empty_model_turn_survives_openai_serialization():
+    from nano.providers import _normalize_for_openai
+
+    fp = FakeProvider([])
+    agent = Agent(provider=fp, system="sys")
+    msg = agent._assistant_message(
+        StepResult(text=None, tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 0)))
+    out = _normalize_for_openai(msg)
+
+    # Neither content nor tool_calls may be empty, or the turn carries nothing.
+    assert out[0].get("content") or out[0].get("tool_calls")
+
+
 def test_agent_survives_a_raising_on_event_observer():
     # _emit runs inside the loop's try, so a crashing observer (e.g. the CLI
     # printer choking on markup-shaped build output) used to be converted into
@@ -314,7 +344,7 @@ def test_agent_pushes_back_on_toolless_done_up_to_cap():
                    usage=_u(20 + i, 5))
         for i in range(4)  # 3 pushbacks consumed, 4th done accepted
     ])
-    agent = Agent(provider=fp, system="sys", max_iterations=20)
+    agent = Agent(provider=fp, system="sys", max_iterations=20, max_pushbacks=3)
     result = agent.run("hard task")
 
     assert result.stop_reason == "unverified"

@@ -26,7 +26,7 @@ class Agent:
     max_input_tokens: int = 200_000
     truncation_char_budget: int = 120_000  # ~30k tokens of tool_result content
     verify: bool = True  # gate "done" behind tool evidence (see max_pushbacks)
-    max_pushbacks: int = 3  # toolless "done"s challenged before giving in
+    max_pushbacks: int = 8  # toolless "done"s challenged before giving in
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
 
@@ -245,6 +245,14 @@ class Agent:
         for tc in sr.tool_calls:
             content_blocks.append({"type": "tool_use", "id": tc.id,
                                    "name": tc.name, "input": tc.arguments})
+        if not content_blocks:
+            # The model produced nothing at all. An empty-content assistant
+            # message is invalid to Anthropic (400, and 400 is not retryable,
+            # so it ends the run) and reads as a blank turn to OpenAI, which
+            # tends to beget more blank turns until the verify budget is gone.
+            # A visible placeholder keeps the history well-formed and tells
+            # the model what just happened.
+            content_blocks.append({"type": "text", "text": "(no output)"})
         return {"role": "assistant", "content": content_blocks}
 
     def _execute_tool_calls(self, calls: list[ToolCall],
