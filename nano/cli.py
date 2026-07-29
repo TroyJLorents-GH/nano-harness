@@ -6,6 +6,7 @@ import sys
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.text import Text
 
 from .agent import Agent
 from .prompts import SYSTEM_PROMPT
@@ -29,20 +30,25 @@ def build_provider(*, model: str, base_url: str | None) -> Provider:
 
 
 def _print_event(event: dict) -> None:
+    # Everything printed here is untrusted model/shell output. It goes through
+    # Text() so rich never parses it as console markup: a build line like
+    # "make: *** [/usr/.../shlib.mk:10: x.so] Error 1" reads as an unmatched
+    # closing tag and raises MarkupError, which used to kill the whole run.
     et = event["type"]
     if et == "assistant":
         if event.get("text"):
-            _console.print(Panel(event["text"], title="assistant", border_style="cyan"))
+            _console.print(Panel(Text(str(event["text"])), title="assistant",
+                                 border_style="cyan"))
         # Log the tool calls themselves, not just their output. Without the
         # inputs a transcript is unreadable: you see what came back but never
         # what the model actually ran.
         for tc in event.get("tool_calls") or []:
             args = ", ".join(f"{k}={v!r}" for k, v in tc.arguments.items())
-            _console.print(Panel(f"{tc.name}({args})", title="tool_call",
+            _console.print(Panel(Text(f"{tc.name}({args})"), title="tool_call",
                                  border_style="yellow"))
     elif et == "tool_result":
         title = "tool_result" + (" (error)" if event.get("is_error") else "")
-        _console.print(Panel(event["output"][:2000], title=title,
+        _console.print(Panel(Text(str(event["output"])[:2000]), title=title,
                              border_style="red" if event.get("is_error") else "green"))
     elif et == "stats":
         _console.print(f"[dim]iter={event['iteration']} "

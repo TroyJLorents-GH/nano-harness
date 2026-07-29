@@ -35,8 +35,15 @@ class Agent:
             self.bash = BashTool()
 
     def _emit(self, event: dict[str, Any]) -> None:
+        # Observers are telemetry, never load-bearing. _emit runs inside the
+        # loop's try, so without this guard a crashing printer (rich markup in
+        # build output, a broken pipe, a bad terminal encoding) would surface
+        # as stop_reason="error" and throw away a working run.
         if self.on_event:
-            self.on_event(event)
+            try:
+                self.on_event(event)
+            except Exception:  # noqa: BLE001 - telemetry must not fail the task
+                pass
 
     def run(self, task: str) -> AgentResult:
         messages: list[dict[str, Any]] = [{"role": "user", "content": task}]

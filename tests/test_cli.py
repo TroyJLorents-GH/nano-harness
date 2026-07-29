@@ -62,3 +62,28 @@ def test_print_event_shows_tool_call_inputs(capsys):
     out = capsys.readouterr().out
     assert "bash(" in out
     assert "ls -la" in out
+
+
+# Build tools print things like "make: *** [/usr/share/make/shlib.mk:10: x.so]
+# Error 1". Rich parses "[...]" as console markup, and a "[/...]" fragment reads
+# as a closing tag with no opener -> MarkupError. The printer runs inside the
+# agent loop's try, so this turned ordinary build output into a dead run.
+MARKUP_BOMB = "make: *** [/usr/share/R/share/make/shlib.mk:10: RcppEigen.so] Error 1"
+
+
+def test_print_event_survives_markup_in_tool_output(capsys):
+    from nano.cli import _print_event
+
+    _print_event({"type": "tool_result", "output": MARKUP_BOMB, "is_error": True})
+    assert "shlib.mk" in capsys.readouterr().out
+
+
+def test_print_event_survives_markup_in_assistant_text_and_args(capsys):
+    from nano.cli import _print_event
+    from nano.providers import ToolCall
+
+    _print_event({"type": "assistant", "text": MARKUP_BOMB, "tool_calls": []})
+    _print_event({"type": "assistant", "text": None,
+                  "tool_calls": [ToolCall(id="t1", name="bash",
+                                          arguments={"command": MARKUP_BOMB})]})
+    assert "shlib.mk" in capsys.readouterr().out

@@ -281,6 +281,26 @@ def test_agent_unverified_when_no_evidence_and_no_pushback_room():
     assert result.iterations == 2
 
 
+def test_agent_survives_a_raising_on_event_observer():
+    # _emit runs inside the loop's try, so a crashing observer (e.g. the CLI
+    # printer choking on markup-shaped build output) used to be converted into
+    # stop_reason="error" and end an otherwise healthy run. Observers are
+    # telemetry: they must never be able to fail the task.
+    fp = FakeProvider([
+        StepResult(text="answer", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 5)),
+    ])
+
+    def boom(event):
+        raise RuntimeError("printer exploded")
+
+    agent = Agent(provider=fp, system="sys", max_iterations=10, on_event=boom)
+    result = agent.run("do it")
+
+    assert result.stop_reason == "end_turn"
+    assert result.final_text == "answer"
+
+
 def test_agent_pushes_back_on_toolless_done_up_to_cap():
     # A model that keeps declaring done WITHOUT running anything gets pushed
     # back max_pushbacks times. Giving in must not masquerade as success:
