@@ -223,6 +223,13 @@ class Agent:
 
         if total_chars() <= self.truncation_char_budget:
             return
+        # Once over budget, cut down to a LOW-WATER mark, not just under the
+        # line. Stopping exactly at the budget means the next tool result
+        # crosses it again, so truncation re-fires every step - and every
+        # firing mutates a message near the head of history, which kills the
+        # prompt-cache prefix for all remaining requests. Cutting deeper makes
+        # truncation fire once per ~N steps instead.
+        target = int(self.truncation_char_budget * 0.6)
 
         # Drop oldest tool_result content first, then oversized tool_use inputs;
         # keep the block and its id so the tool_use/tool_result pairing survives.
@@ -237,7 +244,7 @@ class Agent:
                     transcript.append({"type": "truncation",
                                        "tool_use_id": b.get("tool_use_id"),
                                        "dropped_chars": original_len})
-                    if total_chars() <= self.truncation_char_budget:
+                    if total_chars() <= target:
                         return
         # Still over budget: shrink the largest string args of past tool_use
         # blocks (e.g. a giant edit_file `new`). The tool already ran; its
@@ -256,7 +263,7 @@ class Agent:
                         transcript.append({"type": "truncation",
                                            "tool_use_id": b.get("id"),
                                            "dropped_chars": len(v)})
-                        if total_chars() <= self.truncation_char_budget:
+                        if total_chars() <= target:
                             return
 
     def _assistant_message(self, sr: StepResult) -> dict[str, Any]:

@@ -22,7 +22,7 @@ def build_provider(*, model: str, base_url: str | None) -> Provider:
         # placeholder when none is set in the env.
         import openai
         key = os.environ.get("OPENAI_API_KEY") or "sk-local"
-        client = openai.OpenAI(base_url=base_url, api_key=key)
+        client = openai.OpenAI(base_url=base_url, api_key=key, timeout=120.0)
         return OpenAIProvider(model=model, base_url=base_url, client=client)
     if model.startswith(("claude", "anthropic")):
         return AnthropicProvider(model=model)

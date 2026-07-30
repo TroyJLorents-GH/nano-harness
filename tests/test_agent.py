@@ -281,6 +281,42 @@ def test_agent_unverified_when_no_evidence_and_no_pushback_room():
     assert result.iterations == 2
 
 
+def test_truncation_cuts_to_low_water_mark_not_just_under_budget():
+    # Truncating to exactly the budget means the very next tool result pushes
+    # history back over it, so truncation re-fires every single step - and
+    # each firing mutates a message near the head of the conversation, which
+    # invalidates the prompt-cache prefix for every remaining request. Cut
+    # down to a low-water mark instead so it fires once per ~N steps.
+    fp = FakeProvider([])
+    agent = Agent(provider=fp, system="sys")
+    agent.truncation_char_budget = 1000
+
+    messages = [{"role": "user", "content": "task"}]
+    for i in range(5):
+        messages.append({"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"t{i}", "name": "bash", "input": {}}]})
+        messages.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"t{i}", "content": "x" * 400}]})
+
+    transcript = []
+    agent._truncate_if_needed(messages, transcript)
+
+    def total():
+        n = 0
+        for m in messages:
+            c = m.get("content")
+            if isinstance(c, str):
+                n += len(c)
+            elif isinstance(c, list):
+                for b in c:
+                    n += len(b.get("text", "")) + len(str(b.get("content", "")))
+        return n
+
+    assert total() <= 600, (
+        f"history still at {total()} chars; truncation stopped at the budget "
+        f"line instead of the low-water mark, so it will re-fire every step")
+
+
 def test_agent_nudges_on_empty_end_turn_instead_of_accepting():
     # A model that returns literally nothing (0 output tokens, no tool calls,
     # stop_reason end_turn) has not completed anything - it failed to

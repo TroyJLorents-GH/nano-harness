@@ -93,8 +93,13 @@ class NanoAgent(BaseInstalledAgent):
         # never let the agent's exit code abort the trial before grading.
         await self.exec_as_agent(
             environment,
+            # 250 iterations: the wall clock is the real budget. 100 was
+            # binding on 46 of 89 trials, and several failed runs hit it with
+            # half their time unused (caffe-cifar-10: iter=100 at 2380s of a
+            # 3600s budget). The clock kills slow tasks first either way, so
+            # a higher cap can't cost anything there.
             f'"$HOME/.local/bin/nano" run {shlex.quote(instruction)} '
-            f"--model {shlex.quote(model)} --max-iterations 100 "
+            f"--model {shlex.quote(model)} --max-iterations 250 "
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true",
             env=env,
         )

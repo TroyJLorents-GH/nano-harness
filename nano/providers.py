@@ -78,7 +78,9 @@ class AnthropicProvider:
     def __post_init__(self) -> None:
         if self.client is None:
             import anthropic
-            self.client = anthropic.Anthropic()
+            # 120s request timeout: the SDK default (600s) times 3 retry
+            # attempts lets one stuck request eat a whole task's wall clock.
+            self.client = anthropic.Anthropic(timeout=120.0)
 
     def step(
         self,
@@ -199,8 +201,9 @@ class OpenAIProvider:
     def __post_init__(self) -> None:
         if self.client is None:
             import openai
-            self.client = openai.OpenAI(base_url=self.base_url) if self.base_url \
-                else openai.OpenAI()
+            # 120s request timeout: see AnthropicProvider.__post_init__.
+            self.client = openai.OpenAI(base_url=self.base_url, timeout=120.0) \
+                if self.base_url else openai.OpenAI(timeout=120.0)
 
     def step(
         self,

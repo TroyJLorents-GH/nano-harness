@@ -18,6 +18,18 @@ def test_bash_runs_simple_command(bash):
     assert "hello" in out
 
 
+def test_bash_default_timeout_fits_real_builds():
+    # 61 of 64 timeout kills in the measured 89-task run were at the old 60s
+    # default; compile-compcert alone lost ~44% of its runtime to them, and
+    # every kill destroys the shell (cwd/env/background state) on top of the
+    # wasted wait. The default must accommodate a compile or test suite.
+    import inspect
+    sig_default = inspect.signature(BashTool.run).parameters["timeout"].default
+    assert sig_default == 300
+    schema = next(t for t in TOOLS if t["name"] == "bash")
+    assert schema["input_schema"]["properties"]["timeout"]["default"] == 300
+
+
 def test_bash_kill_reaps_shell_and_respawns(bash):
     # After a kill, the old shell must be reaped (not left as a zombie) and
     # the next run() must transparently respawn a working shell.

@@ -115,7 +115,7 @@ class BashTool:
         for line in proc.stdout:  # type: ignore[union-attr]
             q.put(line)
 
-    def run(self, command: str, timeout: int = 60) -> str:
+    def run(self, command: str, timeout: int = 300) -> str:
         if self._proc is None or self._proc.poll() is not None:
             self._spawn()
         sentinel = f"__NANO_DONE_{uuid.uuid4().hex}__"
@@ -336,8 +336,8 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "command": {"type": "string"},
-                "timeout": {"type": "integer", "default": 60,
-                            "description": "Seconds before kill. Default 60. "
+                "timeout": {"type": "integer", "default": 300,
+                            "description": "Seconds before kill. Default 300. "
                             "Set generously for builds, installs, and tests."},
             },
             "required": ["command"],
@@ -412,7 +412,7 @@ def _int_arg(arguments: dict[str, Any], key: str, default: int | None = None) ->
 def dispatch(name: str, arguments: dict[str, Any], *, bash: BashTool) -> str:
     if name == "bash":
         _require(arguments, name, "command")
-        return bash.run(arguments["command"], timeout=_int_arg(arguments, "timeout", 60))
+        return bash.run(arguments["command"], timeout=_int_arg(arguments, "timeout", 300))
     if name == "read_file":
         _require(arguments, name, "path")
         return read_file(arguments["path"],
