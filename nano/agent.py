@@ -54,6 +54,7 @@ class Agent:
         pushbacks_left = self.max_pushbacks if self.verify else 0
         challenged = False  # has any "done" been pushed back yet?
         tools_since_nudge = False  # successful tool evidence since last pushback
+        empty_turns = 0  # consecutive turns with no text AND no tool calls
 
         try:
           while True:
@@ -107,6 +108,29 @@ class Agent:
                 messages.append({"role": "user", "content": nudge})
                 transcript.append({"type": "user", "content": nudge})
                 continue
+
+            # A turn with no text AND no tool calls is a failed generation,
+            # not a completion. Accepting it as end_turn threw away a whole
+            # benchmark task at iteration 1 (0 output tokens, reward 0, 87%
+            # of the clock unused). Nudge a retry; three empties in a row
+            # means the model is dead - report that honestly as an error.
+            if not sr.text and not sr.tool_calls and sr.stop_reason == "end_turn":
+                empty_turns += 1
+                if empty_turns >= 3:
+                    return AgentResult(
+                        final_text="agent error: model returned 3 consecutive "
+                                   "empty turns", stop_reason="error",
+                        iterations=iteration,
+                        total_input_tokens=total_in, total_output_tokens=total_out,
+                        total_cache_read_tokens=total_cache, transcript=transcript,
+                    )
+                nudge = ("Your last message was empty. That is not a valid "
+                         "completion. Continue working on the task with tool "
+                         "calls, or state your final answer in full.")
+                messages.append({"role": "user", "content": nudge})
+                transcript.append({"type": "user", "content": nudge})
+                continue
+            empty_turns = 0
 
             if sr.stop_reason == "end_turn":
                 # Verify pass: models grade their own work generously, and

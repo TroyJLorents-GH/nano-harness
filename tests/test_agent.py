@@ -281,6 +281,45 @@ def test_agent_unverified_when_no_evidence_and_no_pushback_room():
     assert result.iterations == 2
 
 
+def test_agent_nudges_on_empty_end_turn_instead_of_accepting():
+    # A model that returns literally nothing (0 output tokens, no tool calls,
+    # stop_reason end_turn) has not completed anything - it failed to
+    # generate. Observed live: polyglot-rust-c ended at iteration 1 of 100
+    # with `in=147 out=0`, was accepted as done, and scored 0 with 87% of its
+    # clock unused. The loop must nudge a retry, not declare victory.
+    fp = FakeProvider([
+        StepResult(text=None, tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 0)),
+        StepResult(text="real answer", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    result = agent.run("task")
+
+    assert result.stop_reason == "end_turn"
+    assert result.final_text == "real answer"
+    assert result.iterations == 2
+    # the model was told its turn was empty
+    second_call = fp.calls[1]["messages"]
+    last_user = [m for m in second_call if m["role"] == "user"][-1]
+    assert "empty" in str(last_user["content"]).lower()
+
+
+def test_agent_gives_up_after_three_consecutive_empty_turns():
+    # A model that stays empty is dead; report an error, don't spin the
+    # remaining budget on nudges or dress the nothing up as success.
+    fp = FakeProvider([
+        StepResult(text=None, tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 0))
+        for _ in range(3)
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    result = agent.run("task")
+
+    assert result.stop_reason == "error"
+    assert result.iterations == 3
+
+
 def test_empty_model_turn_never_yields_an_empty_content_message():
     # A step with no text and no tool calls used to serialize as
     # {"role": "assistant", "content": []}. Anthropic rejects a non-final
