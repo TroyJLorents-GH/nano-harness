@@ -6,9 +6,10 @@
 #
 # Per Codex handoff 008, this runs with NO timeout/resource overrides
 # (--timeout-multiplier default 1.0) so it matches submission rules and reveals
-# whether nano's 100-iteration loop finishes inside the official 2.1 limits.
-# If tasks die on AgentTimeoutError under default limits, that is a real finding:
-# nano would need a lower max_iterations (or be faster) to be submission-viable.
+# whether nano's loop terminates cleanly inside the official 2.1 limits.
+# Errored trials are forced to reward ZERO on the official metric even if the
+# verifier would pass the workspace, so clean termination is the whole game:
+# score both raw verifier rewards AND submission-equivalent (errors zeroed).
 #
 # Usage (from repo root, fresh PowerShell):
 #   .\scripts\tb21_smoke.ps1                 # default: mult 1.0 (submission-valid)

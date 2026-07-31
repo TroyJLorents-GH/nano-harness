@@ -93,13 +93,18 @@ class NanoAgent(BaseInstalledAgent):
         # never let the agent's exit code abort the trial before grading.
         await self.exec_as_agent(
             environment,
-            # 250 iterations: the wall clock is the real budget. 100 was
-            # binding on 46 of 89 trials, and several failed runs hit it with
-            # half their time unused (caffe-cifar-10: iter=100 at 2380s of a
-            # 3600s budget). The clock kills slow tasks first either way, so
-            # a higher cap can't cost anything there.
+            # 130 iterations. The cap must guarantee a CLEAN exit before
+            # Harbor's kill: an AgentTimeoutError is a forced zero on the
+            # official metric even if the workspace would pass, while a clean
+            # max_iterations exit still gets graded (35 such passes in the
+            # 2.0 run). Harbor does not tell agents their task's deadline, so
+            # the cap is derived from measured iteration timing: fastest
+            # observed ~4.7s/iter -> 130 iters ~= 610s, inside the smallest
+            # (900s) budget; heaviest observed ~24-31s/iter fits 3600s+
+            # budgets. Slow iterations on short budgets are clock-limited far
+            # below any cap and only faster iterations can save those.
             f'"$HOME/.local/bin/nano" run {shlex.quote(instruction)} '
-            f"--model {shlex.quote(model)} --max-iterations 250 "
+            f"--model {shlex.quote(model)} --max-iterations 130 "
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true",
             env=env,
         )

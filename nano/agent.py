@@ -26,7 +26,10 @@ class Agent:
     max_input_tokens: int = 200_000
     truncation_char_budget: int = 120_000  # ~30k tokens of tool_result content
     verify: bool = True  # gate "done" behind tool evidence (see max_pushbacks)
-    max_pushbacks: int = 8  # toolless "done"s challenged before giving in
+    max_pushbacks: int = 3  # toolless "done"s challenged before giving in
+    # (3, deliberately: under a hard external wall clock, extra challenges can
+    # keep a finished-enough run alive until the outer kill, converting a
+    # cleanly graded exit into a forced-zero timeout. Raise only with evidence.)
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
 
