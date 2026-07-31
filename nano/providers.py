@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -248,10 +249,11 @@ class OpenAIProvider:
             # fixable error instead of crashing the run.
             if not isinstance(args, dict):
                 args = {"_raw": tc.function.arguments}
-            # Some OpenAI-compatible gateways omit the id. It is only used to
-            # pair the call with its tool_result, so any stable unique value
-            # works - and a missing one must not crash the run.
-            call_id = tc.id or f"call_{len(tool_calls)}"
+            # Some OpenAI-compatible gateways omit the id. It pairs the call
+            # with its tool_result, so it must be unique across the WHOLE
+            # conversation (an index restarts every response and collides
+            # across turns) - and a missing one must not crash the run.
+            call_id = tc.id or f"call_{uuid.uuid4().hex[:12]}"
             tool_calls.append(ToolCall(id=call_id, name=tc.function.name,
                                        arguments=args))
 

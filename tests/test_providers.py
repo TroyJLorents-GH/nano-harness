@@ -395,6 +395,28 @@ def test_openai_null_tool_call_id_does_not_crash(monkeypatch):
     assert sr.tool_calls[0].arguments == {"command": "ls"}
 
 
+def test_openai_synthesized_ids_unique_across_turns(monkeypatch):
+    # call_{index} restarts at call_0 in every response, so a gateway that
+    # omits ids on two different turns puts two distinct tool calls with the
+    # SAME id into the conversation - and tool_results pair by id. Synthesized
+    # ids must be unique across the whole conversation, not just one response.
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    fake_client = MagicMock()
+    resp = MagicMock()
+    resp.choices = [MagicMock(
+        message=_OaiMsg([_OaiTC('{"command": "ls"}', id=None)]),
+        finish_reason="tool_calls")]
+    resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+    fake_client.chat.completions.create.return_value = resp
+    p = OpenAIProvider(model="x", client=fake_client)
+
+    id1 = p.step([{"role": "user", "content": "hi"}], [], "sys").tool_calls[0].id
+    id2 = p.step([{"role": "user", "content": "hi"}], [], "sys").tool_calls[0].id
+
+    assert id1 != id2, "synthesized ids collide across turns"
+
+
 def test_openai_wrong_type_tool_args_wrapped(monkeypatch):
     import nano.providers as providers
     monkeypatch.setattr(providers.time, "sleep", lambda s: None)
