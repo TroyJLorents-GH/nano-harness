@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import MagicMock
 
 from nano.agent import Agent, AgentResult
 from nano.providers import StepResult, ToolCall, Usage
@@ -281,6 +282,137 @@ def test_agent_unverified_when_no_evidence_and_no_pushback_room():
     assert result.iterations == 2
 
 
+def test_agent_exits_cleanly_when_max_runtime_exceeded(monkeypatch):
+    # Official scoring forces an errored (externally killed) trial to reward
+    # zero even when the workspace would pass, while a clean exit is graded.
+    # With a known budget the loop must stop itself before the outer kill.
+    import nano.agent as agent_mod
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(agent_mod.time, "monotonic", lambda: clock["t"])
+
+    def step_then_advance(messages, tools, system):
+        clock["t"] += 400.0  # each step costs 400 "seconds"
+        return StepResult(text="working", tool_calls=[ToolCall(
+            id=f"t{clock['t']}", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(10, 5))
+
+    fp = MagicMock()
+    fp.step.side_effect = step_then_advance
+
+    class _OkBash:
+        def run(self, command, timeout=300):
+            return "ok\n"
+
+    agent = Agent(provider=fp, system="sys", max_iterations=50,
+                  max_runtime_sec=900.0, bash=_OkBash())
+    result = agent.run("task")
+
+    assert result.stop_reason == "max_runtime"
+    assert result.iterations <= 3  # 400s/step against a 900s budget
+
+
+def test_agent_wrap_up_nudge_fires_late_in_the_budget(monkeypatch):
+    # Past 80% of the budget the agent gets one explicit instruction to get
+    # the workspace gradable and finish, and verify pushbacks stop (a
+    # challenge this late risks converting a clean exit into an outer kill).
+    import nano.agent as agent_mod
+    clock = {"t": 0.0}
+    monkeypatch.setattr(agent_mod.time, "monotonic", lambda: clock["t"])
+
+    steps = iter([
+        (300.0, StepResult(text="working", tool_calls=[ToolCall(
+            id="t1", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(10, 5))),
+        (550.0, StepResult(text="more", tool_calls=[ToolCall(
+            id="t2", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(10, 5))),
+        (860.0, StepResult(text="last bit", tool_calls=[ToolCall(
+            id="t3", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(10, 5))),
+        (880.0, StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                           usage=_u(10, 5))),
+    ])
+    calls = []
+
+    def step(messages, tools, system):
+        calls.append([dict(m) for m in messages])
+        t, sr = next(steps)
+        clock["t"] = t
+        return sr
+
+    fp = MagicMock()
+    fp.step.side_effect = step
+
+    class _OkBash:
+        def run(self, command, timeout=300):
+            return "ok\n"
+
+    agent = Agent(provider=fp, system="sys", max_iterations=50,
+                  max_runtime_sec=1000.0, bash=_OkBash())
+    result = agent.run("task")
+
+    # done at 86% of budget: verify pushback must NOT fire
+    assert result.stop_reason == "end_turn"
+    assert result.final_text == "done"
+    # the wrap-up nudge appeared exactly once, as its own user message
+    flat = [m for msgs in calls for m in msgs]
+    nudges = [m for m in flat if m.get("role") == "user"
+              and "Time is nearly up" in str(m.get("content"))]
+    assert nudges, "wrap-up nudge never delivered"
+
+
+def test_consecutive_duplicate_calls_get_a_signal():
+    # 10.9% of calls in the measured run were exact repeats (worst streak
+    # 251 consecutive). The 2nd+ identical call in a row gets a note appended
+    # to its result; a different call resets, so pytest-after-edit is silent.
+    class _OkBash:
+        def run(self, command, timeout=300):
+            return "ok\n"
+
+    agent = Agent(provider=FakeProvider([]), system="sys", bash=_OkBash())
+    agent._t0, agent._last_sig, agent._repeat_n = 0.0, None, 0
+    tr = []
+    r1 = agent._execute_tool_calls([ToolCall(
+        id="a", name="bash", arguments={"command": "pytest"})], tr)
+    r2 = agent._execute_tool_calls([ToolCall(
+        id="b", name="bash", arguments={"command": "pytest"})], tr)
+    r3 = agent._execute_tool_calls([ToolCall(
+        id="c", name="bash", arguments={"command": "ls"})], tr)
+    r4 = agent._execute_tool_calls([ToolCall(
+        id="d", name="bash", arguments={"command": "pytest"})], tr)
+
+    assert "cannot produce a new result" not in r1[0]["content"]
+    assert "2x in a row" in r2[0]["content"]
+    assert "cannot produce a new result" not in r3[0]["content"]
+    assert "cannot produce a new result" not in r4[0]["content"], "reset failed"
+
+
+def test_bash_timeout_clamped_to_remaining_budget():
+    # A model told to 'set timeout generously' can pass timeout=3600 on a
+    # 900s-budget task; one hung command then guarantees the external kill
+    # (forced zero). With a known deadline the executed timeout is clamped to
+    # the remaining budget minus teardown margin - without mutating the
+    # arguments recorded in history.
+    import time as _t
+    captured = {}
+
+    class _CapBash:
+        def run(self, command, timeout=300):
+            captured["timeout"] = timeout
+            return "ok\n"
+
+    agent = Agent(provider=FakeProvider([]), system="sys",
+                  max_runtime_sec=900.0, bash=_CapBash())
+    agent._t0 = _t.monotonic() - 700.0  # 700s elapsed, ~200s remaining
+    agent._last_sig, agent._repeat_n = None, 0
+    call = ToolCall(id="a", name="bash",
+                    arguments={"command": "sleep 5", "timeout": 3600})
+    agent._execute_tool_calls([call], [])
+
+    assert captured["timeout"] <= 160
+    assert call.arguments["timeout"] == 3600, "history args were mutated"
+
+
 def test_tool_calls_execute_even_when_stop_reason_says_end_turn():
     # OpenAI-compatible proxies sometimes return finish_reason "stop" WITH
     # tool_calls populated; the provider maps "stop" to "end_turn". The old
@@ -504,8 +636,10 @@ def test_agent_emits_running_stats_each_step():
     agent.run("task")
     stats = [e for e in events if e["type"] == "stats"]
     assert len(stats) == 2
-    assert stats[0] == {"type": "stats", "iteration": 1,
-                        "input_tokens": 100, "output_tokens": 20}
+    assert stats[0]["iteration"] == 1
+    assert stats[0]["input_tokens"] == 100
+    assert stats[0]["output_tokens"] == 20
+    assert "elapsed" in stats[0]  # wall-clock visible per step in the logs
     assert stats[1]["input_tokens"] == 250
 
 

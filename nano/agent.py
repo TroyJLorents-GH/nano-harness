@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -30,6 +32,10 @@ class Agent:
     # (3, deliberately: under a hard external wall clock, extra challenges can
     # keep a finished-enough run alive until the outer kill, converting a
     # cleanly graded exit into a forced-zero timeout. Raise only with evidence.)
+    max_runtime_sec: float | None = None  # self-imposed wall clock; an
+    # external kill scores zero even on a passing workspace, a clean exit
+    # gets graded. Past 80% the agent is told once to wrap up and verify
+    # pushbacks stop; past 100% the loop returns stop_reason="max_runtime".
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
 
@@ -58,6 +64,19 @@ class Agent:
         challenged = False  # has any "done" been pushed back yet?
         tools_since_nudge = False  # successful tool evidence since last pushback
         empty_turns = 0  # consecutive turns with no text AND no tool calls
+        last_text: str | None = None
+        wrap_up_sent = False
+        t0 = time.monotonic()
+        self._t0 = t0  # _execute_tool_calls clamps bash timeouts against it
+        self._last_sig: tuple[str, str] | None = None  # duplicate-call signal
+        self._repeat_n = 0
+
+        def elapsed() -> float:
+            return time.monotonic() - t0
+
+        def late() -> bool:  # past 80% of a known budget: wrap up, don't explore
+            return (self.max_runtime_sec is not None
+                    and elapsed() > 0.8 * self.max_runtime_sec)
 
         try:
           while True:
@@ -69,6 +88,17 @@ class Agent:
                     total_input_tokens=total_in, total_output_tokens=total_out,
                     total_cache_read_tokens=total_cache, transcript=transcript,
                 )
+            # Self-imposed wall clock: an external kill is a forced zero even
+            # on a passing workspace; a clean exit gets graded on whatever
+            # state the workspace is in.
+            if (self.max_runtime_sec is not None
+                    and elapsed() > self.max_runtime_sec):
+                return AgentResult(
+                    final_text=last_text, stop_reason="max_runtime",
+                    iterations=iteration - 1,
+                    total_input_tokens=total_in, total_output_tokens=total_out,
+                    total_cache_read_tokens=total_cache, transcript=transcript,
+                )
 
             self._truncate_if_needed(messages, transcript)
             sr: StepResult = self.provider.step(messages, TOOLS, self.system)
@@ -76,6 +106,8 @@ class Agent:
             total_out += sr.usage.output_tokens
             total_cache += sr.usage.cache_read_tokens
 
+            if sr.text:
+                last_text = sr.text
             transcript.append({
                 "type": "assistant", "text": sr.text,
                 "tool_calls": [tc.model_dump() for tc in sr.tool_calls],
@@ -86,7 +118,8 @@ class Agent:
             # Running totals every step: a run killed from outside (timeout)
             # must not take its token accounting down with it.
             self._emit({"type": "stats", "iteration": iteration,
-                        "input_tokens": total_in, "output_tokens": total_out})
+                        "input_tokens": total_in, "output_tokens": total_out,
+                        "elapsed": round(elapsed(), 1)})
 
             messages.append(self._assistant_message(sr))
 
@@ -151,8 +184,10 @@ class Agent:
                 # when no tool was ever used.
                 # Don't spend the last iteration on a pushback - a challenge
                 # the model can't answer would return max_iterations and throw
-                # away the summary it just produced.
-                if used_tools and pushbacks_left > 0 and (
+                # away the summary it just produced. Same late in the wall
+                # clock: a challenge there risks converting a clean, gradable
+                # exit into an external kill, which scores zero.
+                if used_tools and pushbacks_left > 0 and not late() and (
                         self.max_iterations - iteration) > 0 and (
                         not challenged or not tools_since_nudge):
                     pushbacks_left -= 1
@@ -203,6 +238,16 @@ class Agent:
             if any(not r["is_error"] for r in tool_results):
                 tools_since_nudge = True
             messages.append({"role": "user", "content": tool_results})
+            # One explicit wrap-up warning past 80% of a known budget, as its
+            # own user message AFTER the tool results (OpenAI requires tool
+            # replies adjacent to their assistant message).
+            if late() and not wrap_up_sent:
+                wrap_up_sent = True
+                nudge = ("Time is nearly up. Stop exploring; get the "
+                         "workspace into the best gradable state now, then "
+                         "finish with your summary.")
+                messages.append({"role": "user", "content": nudge})
+                transcript.append({"type": "user", "content": nudge})
         except Exception as e:  # noqa: BLE001 - any failure becomes a result, not a crash
             transcript.append({"type": "error", "message": f"{type(e).__name__}: {e}"})
             return AgentResult(
@@ -300,8 +345,33 @@ class Agent:
                             transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for call in calls:
+            # Consecutive-duplicate signal: 10.9% of tool calls in the
+            # measured full run were exact repeats (worst streak 251). A
+            # byte-identical call re-issued back to back cannot produce a new
+            # result; say so ON the result. Consecutive-only, so a legitimate
+            # re-run after an intervening edit never triggers.
+            sig = (call.name, json.dumps(call.arguments, sort_keys=True,
+                                         default=str))
+            if sig == self._last_sig:
+                self._repeat_n += 1
+            else:
+                self._last_sig, self._repeat_n = sig, 1
+            # Clamp a bash timeout that would outlive the run's own deadline:
+            # one hung command with timeout=3600 on a 900s budget guarantees
+            # the external kill (a forced zero). Copy the args - the original
+            # dict is already referenced from history.
+            args = call.arguments
+            if call.name == "bash" and self.max_runtime_sec is not None:
+                remaining = self.max_runtime_sec - (time.monotonic() - self._t0)
+                cap = max(5, int(remaining - 45))
+                try:
+                    requested = int(args.get("timeout") or 300)
+                except (TypeError, ValueError):
+                    requested = 300
+                if requested > cap:
+                    args = {**args, "timeout": cap}
             try:
-                output = dispatch(call.name, call.arguments, bash=self.bash)
+                output = dispatch(call.name, args, bash=self.bash)
                 is_error = False
             except ToolError as e:
                 output = f"ERROR: {e}"
@@ -311,6 +381,11 @@ class Agent:
                 # not crash the whole run.
                 output = f"ERROR: {type(e).__name__}: {e}"
                 is_error = True
+            if self._repeat_n >= 2:
+                output += (f"\n[note: this exact call has now been issued "
+                           f"{self._repeat_n}x in a row. An unchanged call "
+                           f"cannot produce a new result - change your "
+                           f"approach.]")
             transcript.append({"type": "tool_result", "id": call.id,
                                "name": call.name, "output": output,
                                "is_error": is_error})
