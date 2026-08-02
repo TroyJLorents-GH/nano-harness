@@ -267,6 +267,39 @@ def test_bash_set_x_does_not_break_sentinel_framing(bash):
     bash.run("set +x", timeout=5)
 
 
+def test_bash_stdin_reader_returns_immediately_not_timeout(bash):
+    if bash._is_cmd:
+        pytest.skip("posix stdin semantics")
+    # A command that reads stdin (bare cat, git commit opening an editor, a
+    # REPL) used to consume the sentinel line and burn the ENTIRE timeout -
+    # 300s, a third of a 900s task budget - before the shell was killed.
+    # The command group runs with stdin from /dev/null: instant EOF instead.
+    import time as _t
+    t0 = _t.monotonic()
+    out = bash.run("cat", timeout=30)
+    assert _t.monotonic() - t0 < 10, "stdin reader hung instead of EOF"
+    assert "NANO_DONE" not in out
+
+
+def test_bash_stdin_guard_preserves_shell_state(bash):
+    if bash._is_cmd:
+        pytest.skip("posix")
+    # The guard must be a brace group, not a subshell: cwd/env changes made
+    # inside the command must still persist to the next call.
+    bash.run("export NANO_GUARD_TEST=alive", timeout=5)
+    out = bash.run("echo $NANO_GUARD_TEST", timeout=5)
+    assert "alive" in out
+
+
+def test_bash_heredoc_still_works_under_stdin_guard(bash):
+    if bash._is_cmd:
+        pytest.skip("posix")
+    # Heredocs carry their own stdin; the group-level /dev/null redirection
+    # must not starve them.
+    out = bash.run("cat <<'EOF'\nheredoc-payload\nEOF", timeout=5)
+    assert "heredoc-payload" in out
+
+
 def test_bash_output_without_trailing_newline(bash):
     if bash._is_cmd:
         pytest.skip("posix printf")

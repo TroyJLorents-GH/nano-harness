@@ -129,11 +129,19 @@ class BashTool:
         nl = "\r\n" if self._is_cmd else "\n"
         if self._is_cmd:
             # Single parse line: %errorlevel% expands before echo. runs.
+            body = command
             tail = f"echo.&echo {sentinel}:%errorlevel%"
         else:
+            # Run the command as a brace group with stdin from /dev/null: a
+            # command that reads stdin (bare cat, git commit opening an
+            # editor, a REPL) would otherwise swallow the sentinel line and
+            # burn the entire timeout. Brace group, not a subshell, so cwd
+            # and env changes still persist; heredocs inside carry their own
+            # stdin and are unaffected.
+            body = f"{{ {command}\n}} </dev/null"
             tail = f"__nano_rc=$?; echo; echo {sentinel}:$__nano_rc"
         assert self._proc and self._proc.stdin
-        self._proc.stdin.write(f"{command}{nl}{tail}{nl}")
+        self._proc.stdin.write(f"{body}{nl}{tail}{nl}")
         self._proc.stdin.flush()
 
         sentinel_re = re.compile(re.escape(sentinel) + r":(-?\d+)\s*$")
