@@ -281,6 +281,38 @@ def test_agent_unverified_when_no_evidence_and_no_pushback_room():
     assert result.iterations == 2
 
 
+def test_tool_calls_execute_even_when_stop_reason_says_end_turn():
+    # OpenAI-compatible proxies sometimes return finish_reason "stop" WITH
+    # tool_calls populated; the provider maps "stop" to "end_turn". The old
+    # flow checked stop_reason before tool_calls, so the pending calls were
+    # silently dropped - and a verify pushback then produced an assistant
+    # message with tool_use blocks followed by a plain user message, which
+    # both APIs reject with a non-retryable 400. Calls present = execute.
+    fp = FakeProvider([
+        StepResult(text="running", tool_calls=[ToolCall(
+            id="t1", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="end_turn", usage=_u(10, 5)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20, 5)),
+    ])
+
+    class _OkBash:
+        def run(self, command, timeout=300):
+            return "ok\n"
+
+    agent = Agent(provider=fp, system="sys", max_iterations=10,
+                  verify=False, bash=_OkBash())
+    result = agent.run("task")
+
+    assert result.stop_reason == "end_turn"
+    assert result.final_text == "done"
+    assert result.iterations == 2
+    # the tool actually ran: the second request carries its tool_result
+    second = fp.calls[1]["messages"]
+    assert any(isinstance(m.get("content"), list) and any(
+        b.get("type") == "tool_result" for b in m["content"]) for m in second)
+
+
 def test_truncation_cuts_to_low_water_mark_not_just_under_budget():
     # Truncating to exactly the budget means the very next tool result pushes
     # history back over it, so truncation re-fires every single step - and

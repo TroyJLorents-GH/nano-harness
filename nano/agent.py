@@ -113,11 +113,13 @@ class Agent:
                 continue
 
             # A turn with no text AND no tool calls is a failed generation,
-            # not a completion. Accepting it as end_turn threw away a whole
-            # benchmark task at iteration 1 (0 output tokens, reward 0, 87%
-            # of the clock unused). Nudge a retry; three empties in a row
-            # means the model is dead - report that honestly as an error.
-            if not sr.text and not sr.tool_calls and sr.stop_reason == "end_turn":
+            # not a completion - whatever the stop_reason says (gateways
+            # return null/unmapped reasons on flaky turns too). Accepting it
+            # as done threw away a whole benchmark task at iteration 1 (0
+            # output tokens, reward 0, 87% of the clock unused). Nudge a
+            # retry; three empties in a row means the model is dead - report
+            # that honestly as an error.
+            if not sr.text and not sr.tool_calls:
                 empty_turns += 1
                 if empty_turns >= 3:
                     return AgentResult(
@@ -135,7 +137,12 @@ class Agent:
                 continue
             empty_turns = 0
 
-            if sr.stop_reason == "end_turn":
+            # Tool calls present = execute them, whatever the stop_reason
+            # claims. OpenAI-compatible proxies sometimes return finish_reason
+            # "stop" (mapped to end_turn) WITH tool_calls attached; dropping
+            # them leaves dangling tool_use blocks in history, and the next
+            # request 400s non-retryably on both APIs.
+            if sr.stop_reason == "end_turn" and not sr.tool_calls:
                 # Verify pass: models grade their own work generously, and
                 # some end a turn merely *describing* their next action. A
                 # "done" is only accepted when backed by *successful* tool
