@@ -116,12 +116,35 @@ slice runs are the signal.
   - cached_tokens: absent, and prompt_tokens=5 for a ~1.4k-token prompt -
     the gateway's token reporting is confirmed fiction; caching status
     unknowable from here.
-- Measure: identical 10-task slice, 1.0x, WITH -UseDeadline. Score
-  errored-count, submission-equivalent, raw verifier, s/iteration,
-  calls/iteration, repeat fraction. Baseline: 6 errored, 2/10
-  submission-equivalent, ~1.01 calls/iteration.
-- Note: a -UseDeadline number is a research number and will be labeled as
-  such; a submission-equivalent claim without the flag needs its own run.
+- RESULT (run nano-tb21-smoke-0802-1127, 1.0x, Opus 4.8):
+  - Errored trials 6 -> 2. Submission-equivalent 2/10 -> 5/10.
+    Raw verifier 6/10 (flat). Clean terminations 4 -> 8.
+  - Meets the pre-registered go/no-go threshold (0-2 errors = GO) for the
+    full 89-task run.
+  - Throughput moved hard: torch-tensor-parallelism 53 iters/900s -> 21
+    iters/227s; write-compressor cap-bound -> 66 iters/391s; overfull-hbox
+    and qemu-startup converted from errors to clean end_turn exits;
+    polyglot-c-py passed while exiting cleanly at the cap.
+  - Duplicate-call signal fired on 2 trials (mechanism live in the wild).
+  - Remaining 2 errors are the genuinely tight ones: caffe-cifar-10 used
+    its full 3600s, regex-log 899s of a 900s budget.
+- IMPORTANT SCOPE CORRECTION: the run was launched WITHOUT -UseDeadline, so
+  P1/P3 (max_runtime exit, wrap-up nudge, timeout clamp) never executed -
+  confirmed by zero "Time is nearly up" occurrences and no --max-runtime in
+  the invocation. Every gain above therefore comes from the bug fixes, the
+  stdin guard, the batching prompt, prompt tuning, and the 16k ceiling.
+  None of it carries the host-side-task.toml legality caveat. The accidental
+  omission bought back the per-feature attribution E6 had given up.
+- Decision: KEPT.
+
+## E7 — Deadline feature in isolation (NEXT)
+- Hypothesis: -UseDeadline converts the 2 remaining errored trials into
+  clean graded exits by stopping before Harbor's kill.
+- Change: same code, run with -UseDeadline. Single variable vs E6's run.
+- Caveat to carry into any writeup: this reads the task's timeout host-side,
+  which Harbor does not expose to agents by design. A number produced with
+  the flag is a research number and must be labeled as such; the E6 number
+  (5/10 submission-equivalent) is the one with no caveat.
 
 ## E5 — Batching instruction (bundled into E6's measurement, not yet run)
 - Hypothesis: the measured 1.01 tool calls per iteration means every round
