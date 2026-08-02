@@ -395,6 +395,39 @@ def test_openai_null_tool_call_id_does_not_crash(monkeypatch):
     assert sr.tool_calls[0].arguments == {"command": "ls"}
 
 
+def test_openai_empty_choices_is_retried(monkeypatch):
+    # A flaky gateway can return 200 with an empty choices list. Indexing it
+    # raised IndexError outside the retry classifier (name matches neither
+    # Timeout nor Connection), so one blip ended the run. It must retry.
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    fake_client = MagicMock()
+    bad = MagicMock(); bad.choices = []
+    good = MagicMock()
+    good.choices = [MagicMock(message=_OaiMsg([]), finish_reason="stop")]
+    good.choices[0].message.content = "ok"
+    good.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+    fake_client.chat.completions.create.side_effect = [bad, good]
+    p = OpenAIProvider(model="x", client=fake_client)
+    sr = p.step([{"role": "user", "content": "hi"}], [], "sys")
+
+    assert sr.text == "ok"
+    assert fake_client.chat.completions.create.call_count == 2
+
+
+def test_openai_mixed_text_and_tool_results_keeps_tool_messages_adjacent():
+    # OpenAI requires role:'tool' replies to IMMEDIATELY follow the assistant
+    # message carrying the tool_calls. Inserting user text before them splits
+    # the pair and 400s. Text must come after the tool messages.
+    from nano.providers import _normalize_for_openai
+    out = _normalize_for_openai({"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t1", "content": "result"},
+        {"type": "text", "text": "wrap up now"},
+    ]})
+    assert out[0]["role"] == "tool", f"tool reply must come first, got {out}"
+    assert out[-1]["role"] == "user"
+
+
 def test_openai_synthesized_ids_unique_across_turns(monkeypatch):
     # call_{index} restarts at call_0 in every response, so a gateway that
     # omits ids on two different turns puts two distinct tool calls with the

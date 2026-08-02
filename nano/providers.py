@@ -186,7 +186,10 @@ def _normalize_for_openai(msg: dict[str, Any]) -> list[dict[str, Any]]:
             elif b.get("type") == "text":
                 text_parts.append(b["text"])
         if text_parts:
-            out_msgs.insert(0, {"role": "user", "content": "\n".join(text_parts)})
+            # AFTER the tool messages: OpenAI requires role:"tool" replies to
+            # immediately follow the assistant message that carried the
+            # tool_calls; user text between them splits the pair and 400s.
+            out_msgs.append({"role": "user", "content": "\n".join(text_parts)})
         return out_msgs
 
     return [msg]
@@ -234,7 +237,15 @@ class OpenAIProvider:
         if oai_tools:
             kwargs["tools"] = oai_tools
 
-        resp = _call_with_retry(lambda: self.client.chat.completions.create(**kwargs))
+        def _create():
+            resp = self.client.chat.completions.create(**kwargs)
+            # A flaky gateway can 200 with no choices; classify it as the
+            # transient connection problem it is so the retry loop covers it.
+            if not getattr(resp, "choices", None):
+                raise ConnectionError("gateway returned no choices")
+            return resp
+
+        resp = _call_with_retry(_create)
         choice = resp.choices[0]
         msg = choice.message
 
