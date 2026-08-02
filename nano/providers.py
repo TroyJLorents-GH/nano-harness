@@ -268,10 +268,15 @@ class OpenAIProvider:
             tool_calls.append(ToolCall(id=call_id, name=tc.function.name,
                                        arguments=args))
 
+        # cached_tokens (when the gateway reports it) answers whether prompt
+        # caching is happening at all on this path - the benchmark runs
+        # entirely through here, and a zero here is a latency finding, not
+        # cosmetics.
+        details = getattr(resp.usage, "prompt_tokens_details", None)
         usage = Usage(
-            input_tokens=getattr(resp.usage, "prompt_tokens", 0),
-            output_tokens=getattr(resp.usage, "completion_tokens", 0),
-            cache_read_tokens=0,
+            input_tokens=getattr(resp.usage, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(resp.usage, "completion_tokens", 0) or 0,
+            cache_read_tokens=getattr(details, "cached_tokens", 0) or 0,
         )
 
         return StepResult(
