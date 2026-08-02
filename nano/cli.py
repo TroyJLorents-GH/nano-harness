@@ -69,6 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--base-url", default=None,
                      help="OpenAI-compatible base URL (Together, vLLM, etc.).")
     run.add_argument("--max-iterations", type=int, default=30)
+    run.add_argument("--max-runtime", type=float, default=None,
+                     help="Self-imposed wall clock (seconds). Past 80%% the "
+                     "agent is told to wrap up; past 100%% it exits cleanly "
+                     "with stop reason max_runtime.")
     args = parser.parse_args(argv)
 
     # Construction failures (missing SDK/key, no usable shell) happen before
@@ -76,7 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         provider = build_provider(model=args.model, base_url=args.base_url)
         agent = Agent(provider=provider, system=SYSTEM_PROMPT,
-                      max_iterations=args.max_iterations, on_event=_print_event)
+                      max_iterations=args.max_iterations,
+                      max_runtime_sec=args.max_runtime, on_event=_print_event)
     except Exception as e:
         _console.print(f"[bold red]setup error:[/] {type(e).__name__}: {e}")
         return 1

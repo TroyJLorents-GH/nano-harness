@@ -17,7 +17,8 @@
 param(
     [string]$Model = "aws/claude4_8_opus",
     [double]$TimeoutMult = 1.0,   # 1.0 = official limits (no override). Codex: keep 1.0.
-    [string]$JobName = ""
+    [string]$JobName = "",
+    [switch]$UseDeadline          # pass task budgets to nano for clean exits
 )
 
 Set-Location $PSScriptRoot\..
@@ -40,6 +41,10 @@ Write-Host "Using OPENAI_BASE_URL = $env:OPENAI_BASE_URL"
 # unicode under Windows cp1252. Force UTF-8.
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+# Deadline-aware clean exits (adapter reads each task's timeout host-side and
+# passes budget-60s to nano). Opt-in; omit for submission runs if the
+# leaderboard maintainers rule the host-side read out.
+if ($UseDeadline) { $env:NANO_USE_DEADLINE = "1" } else { Remove-Item Env:NANO_USE_DEADLINE -ErrorAction SilentlyContinue }
 
 if (-not $JobName) {
     $stamp = Get-Date -Format "MMdd-HHmm"

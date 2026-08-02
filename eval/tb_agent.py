@@ -20,7 +20,9 @@ stdout in <task>/agent/nano.txt.
 from __future__ import annotations
 
 import os
+import re
 import shlex
+import tomllib
 from pathlib import Path
 
 from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
@@ -46,6 +48,33 @@ _INSTALL_NANO = (
     f'"$HOME/.local/bin/uv" tool install --python 3.12 {_REMOTE_DIR} && '
     '"$HOME/.local/bin/nano" --help >/dev/null'
 )
+
+
+def _task_agent_timeout_sec(environment: BaseEnvironment) -> float | None:
+    """Read [agent] timeout_sec from the task's task.toml on the HOST.
+
+    Harbor enforces the agent deadline host-side and deliberately passes it
+    only to its Oracle agent, so the in-container agent cannot learn it from
+    Harbor's plumbing. The adapter, however, runs host-side and
+    environment.environment_dir points into the task directory, whose parent
+    holds task.toml. This reads benchmark METADATA (a timeout), never the
+    solution. It is gated behind NANO_USE_DEADLINE=1 so any run intended for
+    leaderboard submission can omit it if the maintainers rule it out.
+    """
+    try:
+        toml_path = Path(environment.environment_dir).parent / "task.toml"
+        with open(toml_path, "rb") as f:
+            data = tomllib.load(f)
+        val = (data.get("agent") or {}).get("timeout_sec")
+        return float(val) if val else None
+    except Exception:
+        # Regex fallback for a malformed-but-readable file; None otherwise.
+        try:
+            text = toml_path.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"^\s*timeout_sec\s*=\s*([0-9.]+)", text, re.M)
+            return float(m.group(1)) if m else None
+        except Exception:
+            return None
 
 
 class NanoAgent(BaseInstalledAgent):
@@ -89,22 +118,28 @@ class NanoAgent(BaseInstalledAgent):
             for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL")
             if (v := os.environ.get(k))
         }
+        # Deadline-aware clean exit, opt-in via NANO_USE_DEADLINE=1: pass the
+        # task's own budget (minus a 60s teardown margin) so nano exits
+        # cleanly before Harbor's kill. An external kill is a forced zero on
+        # the official metric even when the workspace would pass; a clean
+        # exit is graded. See _task_agent_timeout_sec for the legality note.
+        runtime_flag = ""
+        if os.environ.get("NANO_USE_DEADLINE") == "1":
+            budget = _task_agent_timeout_sec(environment)
+            if budget and budget > 120:
+                runtime_flag = f"--max-runtime {int(budget) - 60} "
         # `|| true`: a partial run (max_iterations) may still pass the tests —
         # never let the agent's exit code abort the trial before grading.
         await self.exec_as_agent(
             environment,
-            # 130 iterations. The cap must guarantee a CLEAN exit before
-            # Harbor's kill: an AgentTimeoutError is a forced zero on the
-            # official metric even if the workspace would pass, while a clean
-            # max_iterations exit still gets graded (35 such passes in the
-            # 2.0 run). Harbor does not tell agents their task's deadline, so
-            # the cap is derived from measured iteration timing: fastest
-            # observed ~4.7s/iter -> 130 iters ~= 610s, inside the smallest
-            # (900s) budget; heaviest observed ~24-31s/iter fits 3600s+
-            # budgets. Slow iterations on short budgets are clock-limited far
-            # below any cap and only faster iterations can save those.
+            # 130 iterations: the fallback guard when no deadline is passed.
+            # Derived from measured iteration timing (fastest ~4.7s/iter ->
+            # ~610s fits the smallest 900s budget; heaviest ~24-31s/iter fits
+            # 3600s+). A clean max_iterations exit still gets graded (35 such
+            # passes in the 2.0 run).
             f'"$HOME/.local/bin/nano" run {shlex.quote(instruction)} '
             f"--model {shlex.quote(model)} --max-iterations 130 "
+            f"{runtime_flag}"
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true",
             env=env,
         )
