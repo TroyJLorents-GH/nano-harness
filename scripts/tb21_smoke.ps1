@@ -45,6 +45,9 @@ $env:PYTHONIOENCODING = "utf-8"
 # passes budget-60s to nano). Opt-in; omit for submission runs if the
 # leaderboard maintainers rule the host-side read out.
 if ($UseDeadline) { $env:NANO_USE_DEADLINE = "1" } else { Remove-Item Env:NANO_USE_DEADLINE -ErrorAction SilentlyContinue }
+# Output ceiling: probe confirmed the gateway accepts >=64k; 16384 halves the
+# continuation round trips on big file writes.
+$env:NANO_MAX_TOKENS = "16384"
 
 if (-not $JobName) {
     $stamp = Get-Date -Format "MMdd-HHmm"

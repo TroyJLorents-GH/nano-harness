@@ -79,7 +79,51 @@ slice runs are the signal.
   for the full 89. Dominant remaining failure: 900s-budget tasks need more
   iterations than the budget holds at ~1 tool call per round trip.
 
-## E5 — Batching instruction (NEXT, not yet run)
+## E6 — Best-possible ensemble (bundled by owner decision; attribution sacrificed)
+- Scope: everything below lands before ONE measured slice run. Per-change
+  attribution is knowingly given up; the slice measures the ensemble.
+- Landed:
+  - B1: tool calls now execute regardless of stop_reason (gateways return
+    finish_reason "stop" WITH tool_calls; the old order silently dropped
+    them and the follow-up request 400s non-retryably). Latent run-killer.
+  - B3: empty-turn guard covers unmapped finish reasons.
+  - B4: empty-choices gateway responses classified transient and retried.
+  - B6: user text now serializes AFTER role:"tool" replies (OpenAI requires
+    adjacency; prerequisite for the wrap-up nudge).
+  - P5: stdin-reading commands (bare cat, git commit editor, REPLs) get
+    instant EOF via a brace-group </dev/null instead of burning the full
+    300s bash timeout and losing shell state.
+  - P1/P3: max_runtime_sec - self-imposed wall clock. Past 80%: one wrap-up
+    nudge + verify pushbacks stop. Past 100%: clean stop_reason="max_runtime"
+    exit. Executed bash timeouts clamped to remaining-45s. Adapter passes
+    each task's [agent] timeout_sec minus 60s, GATED behind
+    NANO_USE_DEADLINE=1 (host-side task.toml read; legality is a judgment
+    call - the flag exists so submission runs can omit it).
+  - P4: consecutive-duplicate call signal appended to the repeated result
+    (measured 10.9% repeats, worst streak 251; consecutive-only so
+    pytest-after-edit is silent).
+  - P6: prompt - verify against stated criteria instead of authoring tests
+    (hidden verifier makes test-writing pure cost), keep the workspace
+    gradable at all times, no narration, redirect verbose output to files.
+  - P9/P10: cached_tokens telemetry on the gateway path; elapsed seconds in
+    every stats line.
+  - P8: NANO_MAX_TOKENS env knob (default 8192); runner sets 16384.
+- Gateway probe findings (scripts run 2026-08-02, single cheap requests):
+  - image_url: ACCEPTED but the image is silently DROPPED (model reports no
+    image attached). Vision (P7) is therefore REJECTED for any gateway run -
+    it would silently no-op. Revisit only on a direct-Anthropic path.
+  - max_completion_tokens: accepted through 64000. 16384 chosen.
+  - cached_tokens: absent, and prompt_tokens=5 for a ~1.4k-token prompt -
+    the gateway's token reporting is confirmed fiction; caching status
+    unknowable from here.
+- Measure: identical 10-task slice, 1.0x, WITH -UseDeadline. Score
+  errored-count, submission-equivalent, raw verifier, s/iteration,
+  calls/iteration, repeat fraction. Baseline: 6 errored, 2/10
+  submission-equivalent, ~1.01 calls/iteration.
+- Note: a -UseDeadline number is a research number and will be labeled as
+  such; a submission-equivalent claim without the flag needs its own run.
+
+## E5 — Batching instruction (bundled into E6's measurement, not yet run)
 - Hypothesis: the measured 1.01 tool calls per iteration means every round
   trip buys one shell command; instructing the model to issue multiple
   independent tool calls per turn and chain independent shell work raises

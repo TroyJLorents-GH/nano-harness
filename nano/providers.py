@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
+
 
 from pydantic import BaseModel
 
 _RETRYABLE_STATUS = {429, 500, 502, 503, 529}
+
+
+def _max_tokens_default() -> int:
+    """Output-token ceiling, env-tunable (NANO_MAX_TOKENS). 8192 is safe
+    everywhere; the benchmark gateway accepts far higher, and every file
+    write past ~6KB at 8192 costs a whole continuation round trip."""
+    try:
+        return int(os.environ.get("NANO_MAX_TOKENS", 8192))
+    except ValueError:
+        return 8192
 
 
 def _call_with_retry(fn, attempts: int = 3):
@@ -74,7 +86,7 @@ def _ensure_block_list(content: Any) -> list[dict[str, Any]]:
 class AnthropicProvider:
     model: str
     client: Any = None  # injectable for tests; defaults to anthropic.Anthropic()
-    max_tokens: int = 8192  # big file writes get cut at 4096 and waste a continuation turn
+    max_tokens: int = field(default_factory=_max_tokens_default)
 
     def __post_init__(self) -> None:
         if self.client is None:
@@ -200,7 +212,7 @@ class OpenAIProvider:
     model: str
     client: Any = None
     base_url: str | None = None
-    max_completion_tokens: int = 8192  # match AnthropicProvider; fewer mid-write cuts
+    max_completion_tokens: int = field(default_factory=_max_tokens_default)
 
     def __post_init__(self) -> None:
         if self.client is None:
