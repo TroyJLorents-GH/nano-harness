@@ -137,14 +137,34 @@ slice runs are the signal.
   omission bought back the per-feature attribution E6 had given up.
 - Decision: KEPT.
 
-## E7 — Deadline feature in isolation (NEXT)
+## E7 — Deadline feature in isolation
 - Hypothesis: -UseDeadline converts the 2 remaining errored trials into
   clean graded exits by stopping before Harbor's kill.
 - Change: same code, run with -UseDeadline. Single variable vs E6's run.
+  (One latent-bug fix also landed first: a null finish_reason from the
+  gateway now maps to stop_reason "unknown" instead of dying in pydantic
+  validation. Inert on healthy turns; no trial in either run hit it.)
 - Caveat to carry into any writeup: this reads the task's timeout host-side,
   which Harbor does not expose to agents by design. A number produced with
   the flag is a research number and must be labeled as such; the E6 number
   (5/10 submission-equivalent) is the one with no caveat.
+- RESULT (run nano-tb21-smoke-0808-1346, 1.0x, Opus 4.8): CONFIRMED.
+  - Errored trials 2 -> 0. Raw verifier 6/10 -> 7/10.
+    Submission-equivalent 5/10 -> 7/10. Clean terminations 8 -> 10/10.
+  - Both E6 errors converted exactly as hypothesized: caffe-cifar-10 went
+    from AgentTimeoutError at 3754s to a clean end_turn PASS at 2911s
+    (first full pass of that task ever); regex-log went from a
+    forced-zero AgentTimeoutError (verifier would have passed) to a clean
+    PASS at 770s.
+  - make-doom-for-mips exercised the new exit path directly: clean
+    stop_reason=max_runtime at iter 106 instead of an external kill
+    (reward 0 either way, but graded, not errored).
+  - Single-trial variance both directions: polyglot-rust-c 0 -> 1,
+    write-compressor 1 -> 0 (max_iterations at 130). qemu-startup still 0.
+  - Duplicate-call signal fired on 7/10 trials.
+- Decision: KEPT as an opt-in flag. Full-89 runs intended for a
+  publishable/leaderboard number stay -UseDeadline OFF (E6 config);
+  deadline-on full runs are research numbers, labeled as such.
 
 ## E5 — Batching instruction (bundled into E6's measurement, not yet run)
 - Hypothesis: the measured 1.01 tool calls per iteration means every round

@@ -208,6 +208,29 @@ def test_openai_provider_end_turn():
     assert result.stop_reason == "end_turn"  # normalized from "stop"
 
 
+def test_openai_null_finish_reason_becomes_a_string_stop_reason():
+    # Flaky gateways can return finish_reason null. StepResult.stop_reason is
+    # typed str, so passing None through would die in pydantic validation and
+    # end the run as an error - before the agent's empty-turn guard (built for
+    # exactly this case) ever sees the turn.
+    resp = MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(content=None, tool_calls=None),
+            finish_reason=None,
+        )],
+        usage=MagicMock(prompt_tokens=3, completion_tokens=0),
+    )
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = resp
+    p = OpenAIProvider(model="gpt-5", client=fake_client)
+
+    result = p.step(messages=[{"role": "user", "content": "hi"}], tools=[], system="s")
+
+    assert result.stop_reason == "unknown"
+    assert result.text is None
+    assert result.tool_calls == []
+
+
 def test_openai_provider_translates_tool_schema_to_openai_format():
     resp = MagicMock(
         choices=[MagicMock(

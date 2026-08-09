@@ -294,6 +294,10 @@ class OpenAIProvider:
         return StepResult(
             text=msg.content,
             tool_calls=tool_calls,
-            stop_reason=_OAI_FINISH_REASON.get(choice.finish_reason, choice.finish_reason),
+            # A null finish_reason (flaky gateway turn) must still be a string:
+            # StepResult.stop_reason is typed str, and a validation error here
+            # ends the run before the agent's empty-turn guard can handle it.
+            stop_reason=_OAI_FINISH_REASON.get(choice.finish_reason,
+                                               choice.finish_reason or "unknown"),
             usage=usage,
         )
