@@ -506,3 +506,61 @@ def test_openai_truncated_tool_input_not_reinflated():
     assert "truncated" in args
     assert "5000 chars dropped" in args
     assert len(args) < 200  # the giant value is gone
+
+
+# --- E8: adversarial-review fix set -------------------------------------
+
+
+def test_gateway_504_is_retried_like_other_5xx(monkeypatch):
+    # The openai SDK maps every unlisted status >= 500 to InternalServerError,
+    # whose class name matches neither "Connection" nor "Timeout". A 504 from
+    # the proxy therefore ended the trial on the first attempt, while the very
+    # same blip returning 502 survived three attempts with backoff.
+    class InternalServerError(Exception):
+        def __init__(self, status_code):
+            super().__init__(f"server error {status_code}")
+            self.status_code = status_code
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise InternalServerError(504)
+        return "ok"
+
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    assert _call_with_retry(flaky) == "ok"
+    assert calls["n"] == 3
+
+
+def test_client_error_is_still_not_retried():
+    class BadRequestError(Exception):
+        def __init__(self):
+            super().__init__("bad request")
+            self.status_code = 400
+
+    calls = {"n": 0}
+
+    def bad():
+        calls["n"] += 1
+        raise BadRequestError()
+
+    try:
+        _call_with_retry(bad)
+    except BadRequestError:
+        pass
+    else:
+        raise AssertionError("a 400 must not be retried or swallowed")
+    assert calls["n"] == 1
+
+
+def test_request_timeout_scales_with_the_output_ceiling():
+    # A non-streaming request returns nothing until the whole body is ready, so
+    # a 16k-token generation needs more than 120s of headroom. The old fixed
+    # 120s made large file writes time out deterministically on every retry.
+    from nano.providers import _request_timeout
+    assert _request_timeout(8192) > 120
+    assert _request_timeout(16384) > _request_timeout(8192)
+    assert _request_timeout(64000) <= 600  # still bounded

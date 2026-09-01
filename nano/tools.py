@@ -138,8 +138,15 @@ class BashTool:
             # burn the entire timeout. Brace group, not a subshell, so cwd
             # and env changes still persist; heredocs inside carry their own
             # stdin and are unaffected.
-            body = f"{{ {command}\n}} </dev/null"
-            tail = f"__nano_rc=$?; echo; echo {sentinel}:$__nano_rc"
+            # `|| __nano_rc=$?` also makes the group the left arm of an OR
+            # list, which suppresses errexit for it. Without that, a model that
+            # once ran `set -euo pipefail` (they do, habitually) armed every
+            # LATER failing command to kill the shell before the sentinel line
+            # ran: the failure surfaced as "Shell process exited unexpectedly"
+            # with the diagnostics discarded and cwd/env silently reset.
+            body = (f"{{ {command}\n}} </dev/null && __nano_rc=0 "
+                    f"|| __nano_rc=$?")
+            tail = f"echo; echo {sentinel}:$__nano_rc"
         assert self._proc and self._proc.stdin
         self._proc.stdin.write(f"{body}{nl}{tail}{nl}")
         self._proc.stdin.flush()
@@ -152,9 +159,19 @@ class BashTool:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._kill()
+                # Ship whatever the command printed before it hung. Without it
+                # a test suite that passed 40 cases then deadlocked came back
+                # with nothing at all, so the model could not tell WHERE it
+                # hung and simply re-ran the whole thing with a bigger timeout.
+                partial = "".join(out_lines).rstrip("\r\n")
+                if self._is_cmd:
+                    partial = _strip_cmd_prompt(partial)
+                head = (_truncate(partial) + "\n") if partial.strip() else ""
                 raise ToolError(
-                    f"Command exceeded timeout of {timeout}s and was killed: "
-                    f"{command!r}. The shell was restarted: cwd, env vars, and "
+                    head
+                    + f"Command exceeded timeout of {timeout}s and was killed: "
+                    f"{command!r}. Output above is everything it printed before "
+                    f"hanging. The shell was restarted: cwd, env vars, and "
                     f"background processes are reset. Re-establish state if "
                     f"needed; pass a larger timeout for long commands."
                 )
@@ -302,7 +319,13 @@ def edit_file(path: str, old: str, new: str) -> str:
     # newlines - in either direction.
     with p.open(encoding="utf-8", newline="") as f:  # newline="" preserves \r\n
         raw = f.read()
-    if raw.count(old) == 1:
+    # Uniqueness is judged on the NORMALIZED view, because that is the only
+    # view the model ever sees (read_file translates newlines). Two blocks
+    # differing only in line endings look identical to it, so a byte-exact
+    # single match is not proof of uniqueness - it silently edited whichever
+    # copy happened to share the endings the model sent.
+    _norm_count = raw.replace("\r\n", "\n").count(old.replace("\r\n", "\n"))
+    if raw.count(old) == 1 and _norm_count <= 1:
         result = raw.replace(old, new, 1)
     else:
         work = raw.replace("\r\n", "\n")

@@ -758,3 +758,123 @@ def test_agent_truncates_huge_tool_use_input():
         for m in last
     )
     assert not seen_big
+
+
+# --- E8: adversarial-review fix set -------------------------------------
+
+
+def test_repeated_max_tokens_turns_give_up_instead_of_spinning():
+    # A gateway that keeps returning length-cut output with no parseable tool
+    # calls used to be nudged forever: the only bound was max_iterations, so
+    # the trial burned its whole budget and died on the EXTERNAL kill, which
+    # scores zero even when the workspace would pass. Cap it like empty turns.
+    fp = FakeProvider([
+        StepResult(text="cut off mid-", tool_calls=[],
+                   stop_reason="max_tokens", usage=_u(10, 8192))
+        for _ in range(10)
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=50, verify=False)
+    result = agent.run("write a big file")
+
+    assert result.stop_reason == "max_tokens"
+    # 3 strikes, not 50 iterations of nudging.
+    assert result.iterations <= 4, f"spun {result.iterations} times"
+
+
+def test_empty_turn_flagged_max_tokens_still_counts_as_an_empty_turn():
+    # finish_reason "length" with EMPTY content is a failed generation. The
+    # continuation branch used to swallow it before the empty-turn guard ran,
+    # so the dead-model detector never fired.
+    fp = FakeProvider([
+        StepResult(text=None, tool_calls=[], stop_reason="max_tokens",
+                   usage=_u(10, 0))
+        for _ in range(10)
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=50, verify=False)
+    result = agent.run("do it")
+
+    assert result.iterations <= 4
+    assert result.stop_reason in ("error", "max_tokens")
+
+
+def test_a_productive_turn_resets_the_max_tokens_strike_count():
+    # Two cutoffs, real progress, then two more must NOT trip the 3-strike cap:
+    # long file writes legitimately hit the ceiling more than once per task.
+    big = StepResult(text="cut", tool_calls=[], stop_reason="max_tokens",
+                     usage=_u(10, 8192))
+    fp = FakeProvider([
+        big, big,
+        StepResult(text="ok", tool_calls=[ToolCall(
+            id="t1", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(20, 10)),
+        big, big,
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(30, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=50, verify=False)
+    result = agent.run("write two big files")
+
+    assert result.stop_reason == "end_turn"
+    assert result.final_text == "done"
+
+
+def test_truncation_spares_the_tool_result_the_model_has_not_seen(tmp_workdir):
+    # Pass 1 blanked oldest-to-newest including the result appended at the end
+    # of the PREVIOUS iteration - output the model never got to read. It then
+    # re-runs the command, and the duplicate-call note scolds it for doing so.
+    big = tmp_workdir / "big.txt"
+    big.write_text("x" * 40_000)
+    small = tmp_workdir / "small.txt"
+    small.write_text("the answer is 42" + chr(10))
+
+    fp = FakeProvider([
+        StepResult(text="read big", tool_calls=[ToolCall(
+            id="t1", name="read_file", arguments={"path": str(big)})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+        StepResult(text="read small", tool_calls=[ToolCall(
+            id="t2", name="read_file", arguments={"path": str(small)})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 5)),
+    ])
+    # read_file caps its own output at 16k, so the budget must sit below that
+    # for the pair of results to breach it at all.
+    agent = Agent(provider=fp, system="sys", max_iterations=10, verify=False,
+                  truncation_char_budget=10_000)
+    agent.run("read both")
+
+    # On the 3rd request the older result is gone but the freshest survives.
+    sent = fp.calls[-1]["messages"]
+    results = {}
+    for m in sent:
+        if isinstance(m.get("content"), list):
+            for b in m["content"]:
+                if b.get("type") == "tool_result":
+                    results[b["tool_use_id"]] = str(b["content"])
+    assert results["t1"].startswith("[truncated")
+    assert "42" in results["t2"],         "the freshest tool_result was blanked before the model ever saw it"
+
+
+def test_a_single_oversized_fresh_result_is_still_truncated(tmp_workdir):
+    # The exemption is a preference, not a guarantee: one tool_result bigger
+    # than the whole budget (a giant log dumped to stdout) must still be cut,
+    # or the next request is unsendable.
+    huge = tmp_workdir / "huge.txt"
+    huge.write_text("y" * 60_000)
+
+    fp = FakeProvider([
+        StepResult(text="read", tool_calls=[ToolCall(
+            id="t1", name="read_file", arguments={"path": str(huge)})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10, verify=False,
+                  truncation_char_budget=10_000)
+    agent.run("read the huge one")
+
+    sent = fp.calls[-1]["messages"]
+    total = sum(len(str(b.get("content", "")))
+                for m in sent if isinstance(m.get("content"), list)
+                for b in m["content"])
+    assert total < 10_000

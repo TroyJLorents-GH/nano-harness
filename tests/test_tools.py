@@ -392,3 +392,64 @@ def test_edit_file_edits_through_symlink(tmp_workdir):
     edit_file(str(link), old="v = 1", new="v = 2")
     assert target.read_text() == "v = 2\n"
     assert link.is_symlink(), "edit replaced the symlink with a regular file"
+
+
+# --- E8: adversarial-review fix set -------------------------------------
+
+
+def test_set_e_does_not_kill_the_shell_on_a_later_failure():
+    # Models routinely open a call with `set -euo pipefail`. errexit persists
+    # in the shared shell, so the NEXT failing command used to terminate the
+    # shell before the sentinel line ran: the model got "Shell process exited
+    # unexpectedly", lost its cwd/env, and lost the failing test's output.
+    bash = BashTool()
+    try:
+        bash.run("set -e; echo armed")
+        with pytest.raises(ToolError) as exc:
+            bash.run("echo diagnostics-here; false")
+        msg = str(exc.value)
+        assert "exited unexpectedly" not in msg
+        assert "diagnostics-here" in msg
+        assert "exit code 1" in msg
+        # The shell survived: state is intact.
+        assert "still-alive" in bash.run("echo still-alive")
+    finally:
+        bash.close()
+
+
+def test_timeout_error_carries_the_output_captured_before_the_hang():
+    # The exit-code path attaches output "for diagnosis"; the timeout path
+    # threw it away, so a suite that printed 40 passing tests then hung came
+    # back with nothing at all.
+    bash = BashTool()
+    try:
+        with pytest.raises(ToolError) as exc:
+            bash.run("echo $((6 * 7)); sleep 30", timeout=2)
+        msg = str(exc.value)
+        # 42 appears only in the command's OUTPUT, never in the command text
+        # that the error message echoes back.
+        assert "42" in msg
+        assert "timeout" in msg.lower()
+    finally:
+        bash.close()
+
+
+def test_edit_file_uniqueness_is_checked_against_the_view_the_model_sees(tmp_path):
+    # read_file shows LF-normalized text, so two blocks differing only in line
+    # endings look identical to the model. The byte-exact fast path matched the
+    # LF copy exactly once and silently edited it, bypassing the uniqueness
+    # guard the tool description promises.
+    p = tmp_path / "dup.txt"
+    p.write_bytes(b"foo\nbar\nX\nfoo\r\nbar\r\n")
+    with pytest.raises(ToolError) as exc:
+        edit_file(str(p), "foo\nbar", "EDITED")
+    assert "unique" in str(exc.value).lower()
+    # Nothing was written.
+    assert p.read_bytes() == b"foo\nbar\nX\nfoo\r\nbar\r\n"
+
+
+def test_edit_file_still_edits_a_genuinely_unique_match(tmp_path):
+    p = tmp_path / "ok.txt"
+    p.write_bytes(b"alpha\nbeta\nX\ngamma\r\ndelta\r\n")
+    edit_file(str(p), "alpha\nbeta", "EDITED")
+    assert p.read_bytes() == b"EDITED\nX\ngamma\r\ndelta\r\n"

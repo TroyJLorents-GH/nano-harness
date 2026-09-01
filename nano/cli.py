@@ -10,7 +10,8 @@ from rich.text import Text
 
 from .agent import Agent
 from .prompts import SYSTEM_PROMPT
-from .providers import AnthropicProvider, OpenAIProvider, Provider
+from .providers import (AnthropicProvider, OpenAIProvider, Provider,
+                        _max_tokens_default, _request_timeout)
 
 _console = Console()
 
@@ -22,8 +23,15 @@ def build_provider(*, model: str, base_url: str | None) -> Provider:
         # placeholder when none is set in the env.
         import openai
         key = os.environ.get("OPENAI_API_KEY") or "sk-local"
-        client = openai.OpenAI(base_url=base_url, api_key=key, timeout=120.0)
-        return OpenAIProvider(model=model, base_url=base_url, client=client)
+        # Timeout scaled to the output ceiling and SDK retries off - the
+        # provider's own retry loop owns backoff. Must match
+        # OpenAIProvider.__post_init__: this is the path the benchmark takes.
+        max_out = _max_tokens_default()
+        client = openai.OpenAI(base_url=base_url, api_key=key,
+                               timeout=_request_timeout(max_out),
+                               max_retries=0)
+        return OpenAIProvider(model=model, base_url=base_url, client=client,
+                              max_completion_tokens=max_out)
     if model.startswith(("claude", "anthropic")):
         return AnthropicProvider(model=model)
     return OpenAIProvider(model=model)

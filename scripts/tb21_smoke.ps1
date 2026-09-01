@@ -29,13 +29,17 @@ Get-Content .env | ForEach-Object {
         [Environment]::SetEnvironmentVariable($Matches[1].Trim(), $Matches[2].Trim())
     }
 }
-if (-not $env:OPENAI_API_KEY -and $env:ASU_AIML_TOKEN) { $env:OPENAI_API_KEY = $env:ASU_AIML_TOKEN }
-# Derive the OpenAI-compatible base URL. The ASU gateway's OpenAI shim lives at
-# /v1 (the native ASU endpoint stored in .env is /query, a different API shape).
-if (-not $env:OPENAI_BASE_URL -and $env:ASU_AIML_ENDPOINT) {
+# The ASU gateway token and endpoint travel together. An OPENAI_API_KEY
+# inherited from the user environment (a real OpenAI key for some other
+# project) is never valid against the ASU gateway: every trial 403s at
+# iteration 1 with zero tokens used. When .env carries ASU credentials they
+# win over anything inherited; the source is printed so this is visible.
+if ($env:ASU_AIML_TOKEN -and $env:ASU_AIML_ENDPOINT) {
+    $env:OPENAI_API_KEY  = $env:ASU_AIML_TOKEN
     $env:OPENAI_BASE_URL = $env:ASU_AIML_ENDPOINT -replace '/query/?$', '/v1'
 }
 if (-not $env:OPENAI_BASE_URL) { $env:OPENAI_BASE_URL = "https://api.openai.com/v1" }
+Write-Host "API key source:   $(if ($env:ASU_AIML_TOKEN -and $env:OPENAI_API_KEY -eq $env:ASU_AIML_TOKEN) { 'ASU_AIML_TOKEN (.env)' } else { 'inherited OPENAI_API_KEY' })"
 Write-Host "Using OPENAI_BASE_URL = $env:OPENAI_BASE_URL"
 # Harbor writes result.json with the platform default encoding and crashes on
 # unicode under Windows cp1252. Force UTF-8.

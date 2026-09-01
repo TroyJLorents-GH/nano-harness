@@ -178,3 +178,77 @@ slice runs are the signal.
 - Separately queued (NOT in this experiment): duplicate-call signal (+5 lines
   in agent.py) - 10.9% of calls in the full run were exact repeats, 251
   consecutive.
+
+## E8 — Adversarial-review fix set (bundled; no slice gate)
+- Source: 5-dimension multi-agent review of the whole harness, each finding
+  then put through an adversarial verifier whose default stance was "this
+  claim is wrong". 16 raw findings -> 10 after dedup -> 10 survived
+  refutation. Three were reproduced live against the running code.
+- Landed (8 of the 10; all test-first, 108 -> 120 tests):
+  - NANO_MAX_TOKENS is now forwarded into the task container. Harbor does not
+    propagate host env, and the adapter forwarded only the three API vars, so
+    the probe-verified 16384 ceiling set by BOTH runners had never applied to
+    a single trial - every measurement to date, E6 and E7 included, actually
+    ran at the 8192 default.
+  - The max_tokens continuation nudge is capped at 3 consecutive cutoffs and
+    resets on any productive turn. Uncapped, a gateway stuck at the output
+    ceiling burned the whole task budget and died on the EXTERNAL kill
+    (forced zero); a clean max_tokens exit is graded instead.
+  - A turn that is empty AND flagged "length" now reaches the empty-turn
+    guard. The continuation branch used to swallow it, so the dead-model
+    detector never fired - the polyglot-rust-c failure mode, resurrected
+    through a different stop_reason.
+  - Truncation no longer blanks the freshest tool_result (the output of the
+    calls the model just issued and has not been shown). Oversized tool_use
+    inputs are reclaimed first; a single result larger than the whole budget
+    still gets cut as a last resort.
+  - `set -e` can no longer kill the shell. The brace group is now the left
+    arm of an OR list, so a model that once ran `set -euo pipefail` does not
+    arm every later failing command to terminate the shell before the
+    sentinel - which had been surfacing as "Shell process exited
+    unexpectedly" with the diagnostics discarded and cwd/env silently reset.
+  - Timeout kills carry the output captured before the hang, matching the
+    exit-code path. A suite that passed 40 tests then deadlocked used to come
+    back with nothing at all.
+  - edit_file judges uniqueness on the NORMALIZED view - the only view the
+    model ever sees. A byte-exact single match no longer bypasses the
+    ambiguity error when a second copy differs only in line endings.
+  - Every 5xx is retryable (not a hand-listed set): the SDK maps 504 and
+    Cloudflare 520-524 to one InternalServerError whose class name matches no
+    substring check, so the likeliest gateway failure was classified
+    non-transient and ended the trial on the first attempt. Request timeouts
+    now scale with the output ceiling (a non-streaming 16k generation cannot
+    fit 120s, and retrying an identical too-slow request fails every time),
+    and SDK-internal retries are off so they no longer multiply with
+    _call_with_retry's three attempts.
+  - Found while wiring the above: cli.py builds its OWN OpenAI client on the
+    gateway path - the path the benchmark actually takes - with the old fixed
+    timeout and default SDK retries. Provider-side fixes alone would have
+    changed nothing in a benchmark run. Both paths now share
+    _request_timeout().
+- NOT landed, deliberately:
+  - Lone-CR files defeat multi-line edit_file (verified). Rare in benchmark
+    tasks; the model escapes via sed. Low.
+  - No absolute bash-timeout cap when the deadline flag is off (verified).
+    Own run data argues against acting: neither E6 error was a hung command,
+    because the stdin guard already removed the dominant hang class, and any
+    static cap risks killing legitimate long builds on 3600s-budget tasks.
+    Recorded as a known risk instead.
+- NO SLICE GATE for this set, by decision. The 10-task slice is curated
+  (prior failures + high-delta tasks), so chasing a higher slice score fits
+  noise on the same ten tasks; single-trial flips with no code change are
+  already documented in E4 and E7. The slice's job was clean-termination
+  regression detection and it is at 0 errors. The next measurement is the
+  full 89, whose failures are unbiased signal.
+- Measure: full 89-task TB 2.1, 1.0x, no -UseDeadline, Opus 4.8. Compare
+  errored-trial count and both scores against the 2.0 baseline (53/89).
+- PRE-RUN FINDING (2026-09-01): the two smoke attempts on 08-26 and 08-27
+  both died at iteration 1 on every task with HTTP 403 permission_denied
+  from the gateway, zero tokens in or out. Not a harness defect. A real
+  OpenAI key had been set in the Windows User environment (for another
+  project) after E7; every runner preferred an inherited OPENAI_API_KEY
+  over the ASU token, forwarded it into the container, and the ASU gateway
+  rejected it. Runners now pair the ASU token with the ASU endpoint
+  whenever .env carries both, overriding anything inherited, and print the
+  key source at launch. E8 code was separately proven end to end with a
+  live `nano run` through the real gateway path (clean end_turn, 4 iters).

@@ -23,8 +23,17 @@ Get-Content .env | ForEach-Object {
         [Environment]::SetEnvironmentVariable($Matches[1].Trim(), $Matches[2].Trim())
     }
 }
-if (-not $env:OPENAI_API_KEY -and $env:ASU_AIML_TOKEN) { $env:OPENAI_API_KEY = $env:ASU_AIML_TOKEN }
+# The ASU gateway token and endpoint travel together. An OPENAI_API_KEY
+# inherited from the user environment (a real OpenAI key for some other
+# project) is never valid against the ASU gateway: every trial 403s at
+# iteration 1 with zero tokens used. When .env carries ASU credentials they
+# win over anything inherited; the source is printed so this is visible.
+if ($env:ASU_AIML_TOKEN -and $env:ASU_AIML_ENDPOINT) {
+    $env:OPENAI_API_KEY  = $env:ASU_AIML_TOKEN
+    $env:OPENAI_BASE_URL = $env:ASU_AIML_ENDPOINT -replace '/query/?$', '/v1'
+}
 if (-not $env:OPENAI_BASE_URL) { $env:OPENAI_BASE_URL = "https://api.openai.com/v1" }
+Write-Host "API key source:   $(if ($env:ASU_AIML_TOKEN -and $env:OPENAI_API_KEY -eq $env:ASU_AIML_TOKEN) { 'ASU_AIML_TOKEN (.env)' } else { 'inherited OPENAI_API_KEY' })"
 # Force UTF-8 for all Python file writes. Harbor writes trial result.json with
 # pathlib.write_text(), which defaults to Windows cp1252 and crashes the whole
 # job on any unicode in a trial result. This makes those writes UTF-8 safe.

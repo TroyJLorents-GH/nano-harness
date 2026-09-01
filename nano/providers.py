@@ -10,7 +10,23 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
-_RETRYABLE_STATUS = {429, 500, 502, 503, 529}
+_RETRYABLE_STATUS = {408, 429, 529}
+# Plus every 5xx: a proxy in front of a slow model returns 504 (and Cloudflare
+# 520-524) for exactly the blips 500/502/503 cover. The SDK maps all of them to
+# one InternalServerError whose class name matches no substring check, so
+# listing codes individually silently dropped the most likely gateway failure.
+
+
+def _request_timeout(max_tokens: int) -> float:
+    """Read timeout for one non-streaming completion.
+
+    Nothing arrives until the whole body is ready, so the ceiling has to fit
+    the largest generation the caller allows: at a conservative ~50 tok/s a
+    16k-token write needs ~330s, and a fixed 120s made those fail on every
+    retry, deterministically. Still bounded, because one stuck request must
+    not eat a whole task's wall clock.
+    """
+    return float(min(600, max(120, 30 + max_tokens / 50)))
 
 
 def _max_tokens_default() -> int:
@@ -37,6 +53,7 @@ def _call_with_retry(fn, attempts: int = 3):
             # class of failure, same retry.
             name = type(e).__name__
             transient = (status in _RETRYABLE_STATUS
+                         or (isinstance(status, int) and status >= 500)
                          or "Connection" in name or "Timeout" in name)
             if not transient or attempt == attempts - 1:
                 raise
@@ -91,9 +108,13 @@ class AnthropicProvider:
     def __post_init__(self) -> None:
         if self.client is None:
             import anthropic
-            # 120s request timeout: the SDK default (600s) times 3 retry
-            # attempts lets one stuck request eat a whole task's wall clock.
-            self.client = anthropic.Anthropic(timeout=120.0)
+            # Timeout scaled to the output ceiling (see _request_timeout); the
+            # SDK default of 600s x its own retries lets one stuck request eat
+            # a whole task. max_retries=0 because _call_with_retry already
+            # retries with backoff - stacking the two multiplies worst-case
+            # wall clock by ~3x for no extra resilience.
+            self.client = anthropic.Anthropic(
+                timeout=_request_timeout(self.max_tokens), max_retries=0)
 
     def step(
         self,
@@ -217,9 +238,13 @@ class OpenAIProvider:
     def __post_init__(self) -> None:
         if self.client is None:
             import openai
-            # 120s request timeout: see AnthropicProvider.__post_init__.
-            self.client = openai.OpenAI(base_url=self.base_url, timeout=120.0) \
-                if self.base_url else openai.OpenAI(timeout=120.0)
+            # Timeout + retry policy: see AnthropicProvider.__post_init__.
+            kw: dict[str, Any] = {
+                "timeout": _request_timeout(self.max_completion_tokens),
+                "max_retries": 0,
+            }
+            self.client = openai.OpenAI(base_url=self.base_url, **kw) \
+                if self.base_url else openai.OpenAI(**kw)
 
     def step(
         self,

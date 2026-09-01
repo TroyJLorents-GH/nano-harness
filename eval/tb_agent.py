@@ -115,7 +115,11 @@ class NanoAgent(BaseInstalledAgent):
             model = model.split("/", 1)[-1]
         env = {
             k: v
-            for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL")
+            # NANO_MAX_TOKENS matters here: Harbor does not propagate host
+            # env into the container, so a runner that sets the output ceiling
+            # on the host had no effect at all until it was forwarded.
+            for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+                      "NANO_MAX_TOKENS")
             if (v := os.environ.get(k))
         }
         # Deadline-aware clean exit, opt-in via NANO_USE_DEADLINE=1: pass the

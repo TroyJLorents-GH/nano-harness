@@ -64,6 +64,7 @@ class Agent:
         challenged = False  # has any "done" been pushed back yet?
         tools_since_nudge = False  # successful tool evidence since last pushback
         empty_turns = 0  # consecutive turns with no text AND no tool calls
+        cutoffs = 0  # consecutive output-ceiling cutoffs (see the nudge below)
         last_text: str | None = None
         wrap_up_sent = False
         t0 = time.monotonic()
@@ -136,11 +137,27 @@ class Agent:
                 )
 
             # Output cut off mid-response (often mid-tool-call JSON): nudge a
-            # continuation instead of misreporting success.
-            if sr.stop_reason == "max_tokens" and not sr.tool_calls:
+            # continuation instead of misreporting success. Capped like the
+            # empty-turn guard - an uncapped nudge let a gateway stuck at the
+            # output ceiling burn the whole task budget and die on the
+            # EXTERNAL kill, which scores zero even on a passing workspace.
+            # A clean max_tokens exit here is graded instead. The counter
+            # resets on any productive turn, so legitimately long file writes
+            # can hit the ceiling repeatedly across one task.
+            if (sr.stop_reason == "max_tokens" and not sr.tool_calls
+                    and sr.text):
+                cutoffs += 1
+                if cutoffs >= 3:
+                    return AgentResult(
+                        final_text=sr.text, stop_reason="max_tokens",
+                        iterations=iteration,
+                        total_input_tokens=total_in, total_output_tokens=total_out,
+                        total_cache_read_tokens=total_cache, transcript=transcript,
+                    )
                 nudge = ("Your previous response was cut off by the output "
                          "token limit. Continue: re-issue the incomplete tool "
-                         "call in full, or finish your answer.")
+                         "call in full, or finish your answer. Write large "
+                         "files in several smaller edits rather than one.")
                 messages.append({"role": "user", "content": nudge})
                 transcript.append({"type": "user", "content": nudge})
                 continue
@@ -232,6 +249,7 @@ class Agent:
                 )
 
             used_tools = True
+            cutoffs = 0  # a turn that produced tool calls is progress
             tool_results = self._execute_tool_calls(sr.tool_calls, transcript)
             # Only a *successful* tool counts as verification evidence - a
             # failed-only round must not satisfy the verify gate.
@@ -288,7 +306,11 @@ class Agent:
 
         # Drop oldest tool_result content first, then oversized tool_use inputs;
         # keep the block and its id so the tool_use/tool_result pairing survives.
-        for m in messages:
+        # The LAST message is exempt: it holds the results of the tool calls the
+        # model just issued and has not been shown yet. Blanking those hands it
+        # "[truncated]" for output it never read, so it re-runs the command -
+        # and the duplicate-call note then tells it to stop doing exactly that.
+        for m in messages[:-1]:
             if not isinstance(m.get("content"), list):
                 continue
             for b in m["content"]:
@@ -304,6 +326,8 @@ class Agent:
         # Still over budget: shrink the largest string args of past tool_use
         # blocks (e.g. a giant edit_file `new`). The tool already ran; its
         # result is elsewhere in history, so the full input is no longer needed.
+        # These are often the real bulk, which is why they are reclaimed before
+        # falling back to the freshest tool_result below.
         for m in messages:
             if not isinstance(m.get("content"), list):
                 continue
@@ -320,6 +344,21 @@ class Agent:
                                            "dropped_chars": len(v)})
                         if total_chars() <= target:
                             return
+        # Last resort: a single tool_result so large it blows the budget on its
+        # own (a 500MB log dumped to stdout). Better a truncated newest result
+        # than a request the provider rejects outright.
+        last = messages[-1] if messages else None
+        if last and isinstance(last.get("content"), list):
+            for b in last["content"]:
+                if b.get("type") == "tool_result" and not str(
+                        b.get("content", "")).startswith("[truncated"):
+                    original_len = len(b.get("content", ""))
+                    b["content"] = f"[truncated - {original_len} chars dropped]"
+                    transcript.append({"type": "truncation",
+                                       "tool_use_id": b.get("tool_use_id"),
+                                       "dropped_chars": original_len})
+                    if total_chars() <= target:
+                        return
 
     def _assistant_message(self, sr: StepResult) -> dict[str, Any]:
         # Canonical shape: content blocks are the single source of truth for
