@@ -564,3 +564,48 @@ def test_request_timeout_scales_with_the_output_ceiling():
     assert _request_timeout(8192) > 120
     assert _request_timeout(16384) > _request_timeout(8192)
     assert _request_timeout(64000) <= 600  # still bounded
+
+
+def _empty_oai_response():
+    return MagicMock(
+        choices=[MagicMock(message=MagicMock(content="", tool_calls=None),
+                           finish_reason="stop")],
+        usage=MagicMock(prompt_tokens=3, completion_tokens=2),
+    )
+
+
+def test_openai_empty_completion_is_reasked_before_being_returned(monkeypatch):
+    # Measured on the benchmark gateway: some empty completions are transient
+    # and an identical re-ask answers. Re-ask before handing the agent an
+    # empty turn, so history is not polluted with placeholders and nudges
+    # for a blip that a plain retry would have cleared.
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    good = _fake_openai_response_with_tool()
+    good.choices[0].message.tool_calls[0].function.name = "bash"
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = [
+        _empty_oai_response(), _empty_oai_response(), good]
+    p = OpenAIProvider(model="gpt-5", client=fake_client)
+
+    result = p.step(messages=[{"role": "user", "content": "go"}], tools=[], system="s")
+
+    assert [tc.name for tc in result.tool_calls] == ["bash"]
+    assert fake_client.chat.completions.create.call_count == 3
+
+
+def test_openai_persistently_empty_completion_is_returned_not_raised(monkeypatch):
+    # The agent's empty-turn guard owns the persistent case; the provider must
+    # hand it back as an empty StepResult, never as an exception.
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = [
+        _empty_oai_response() for _ in range(5)]
+    p = OpenAIProvider(model="gpt-5", client=fake_client)
+
+    result = p.step(messages=[{"role": "user", "content": "go"}], tools=[], system="s")
+
+    assert result.tool_calls == [] and not (result.text or "").strip()
+    assert result.stop_reason == "end_turn"
+    assert fake_client.chat.completions.create.call_count == 3  # 1 + 2 re-asks

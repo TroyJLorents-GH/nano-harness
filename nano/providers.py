@@ -283,6 +283,17 @@ class OpenAIProvider:
             return resp
 
         resp = _call_with_retry(_create)
+        # An empty completion (no text, no tool calls) is sometimes transient:
+        # measured on the benchmark gateway, several tasks answered on the
+        # 2nd or 3rd identical request. Re-ask before handing the agent an
+        # empty turn, so a blip does not pollute history with a placeholder
+        # and a nudge. The agent's empty-turn guard still owns the persistent
+        # case; this must return the empty result, never raise.
+        for _ in range(2):
+            m0 = resp.choices[0].message
+            if (m0.content or "").strip() or m0.tool_calls:
+                break
+            resp = _call_with_retry(_create)
         choice = resp.choices[0]
         msg = choice.message
 

@@ -252,3 +252,33 @@ slice runs are the signal.
   whenever .env carries both, overriding anything inherited, and print the
   key source at launch. E8 code was separately proven end to end with a
   live `nano run` through the real gateway path (clean end_turn, 4 iters).
+
+## E9 — Opus 5 through the gateway (model swap, same harness)
+- Run: nano-tb21-smoke-0901-1530, 1.0x, no deadline, aws/claude5_opus, E8 code,
+  first run with the 16384 ceiling actually applied.
+- Result: raw 7/10, errored 3, submission-equivalent 6/10 (vs 4.8 E6 same
+  config: 6/10, 2, 5/10). Far fewer iterations per task (13-37 vs 43-130)
+  at 2-4x the seconds per iteration.
+- The three errors: caffe-cifar-10 and make-doom-for-mips were still
+  iterating at the kill (capability/time, same as 4.8); qemu-startup PASSED
+  the verifier but the agent ran to 900.0s and was force-zeroed - the
+  deadline flag would have saved it, and it is off for submission runs.
+- NEW FAILURE CLASS, not the harness: write-compressor died on "3
+  consecutive empty turns" at iteration 5. Reproduced against the gateway:
+  Opus 5 returns finish=stop, no content, no tool calls, 0 thinking tokens,
+  in ~1.2s, once there is any tool history. Trigger is LEXICAL - a paraphrase
+  of the same task answers. Sweep of all 89 task instructions with one tool
+  round, three passes: Opus 5 empty on 6-8 (stable core of 6: polyglot-c-py,
+  polyglot-rust-c, crack-7z-hash, distribution-search, vulnerable-secret,
+  break-filter-js-from-html), Sonnet 5 empty on 6, Opus 4.8 empty on 0.
+  Retry of the identical request: the core 6 stay empty 5/5; two others
+  recover (cancel-async-tasks ...E., write-compressor ..EE.).
+- Harness change (model-agnostic, test-first): an empty completion is
+  re-asked twice at the provider before it reaches the agent's empty-turn
+  guard, so stochastic blips no longer pollute history with a placeholder
+  and a nudge. The persistent case still surfaces as an honest error.
+  CLI stats lines now carry elapsed seconds (the qemu kill-vs-finish race
+  was undiagnosable without it).
+- Decision: full 89 and any leaderboard passes run on Opus 4.8. Opus 5 via
+  this gateway carries a defect that force-zeros a handful of tasks no
+  harness can fix; committing to it for 445 trials bakes those in.

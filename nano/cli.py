@@ -59,8 +59,12 @@ def _print_event(event: dict) -> None:
         _console.print(Panel(Text(str(event["output"])[:2000]), title=title,
                              border_style="red" if event.get("is_error") else "green"))
     elif et == "stats":
+        # Elapsed seconds on every line: a trial log must say WHEN the loop
+        # ended relative to the task budget, or a kill-vs-finish race is
+        # undiagnosable after the fact.
         _console.print(f"[dim]iter={event['iteration']} "
-                       f"in={event['input_tokens']} out={event['output_tokens']}[/dim]")
+                       f"in={event['input_tokens']} out={event['output_tokens']} "
+                       f"t={event.get('elapsed', 0)}s[/dim]")
 
 
 def main(argv: list[str] | None = None) -> int:
